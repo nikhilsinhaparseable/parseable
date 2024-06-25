@@ -485,16 +485,23 @@ pub trait ObjectStorage: Sync + 'static {
                     .absolute_url(RelativePath::from_path(&stream_relative_path).unwrap())
                     .to_string();
                 let store = CONFIG.storage().get_object_store();
-                let manifest =
-                    catalog::create_from_parquet_file(absolute_path.clone(), &file).unwrap();
-                catalog::update_snapshot(store, stream, manifest).await?;
-                if cache_enabled && cache_manager.is_some() {
-                    cache_updates
-                        .entry(stream)
-                        .or_default()
-                        .push((absolute_path, file));
-                } else {
-                    let _ = fs::remove_file(file);
+                let manifest_result =
+                    catalog::create_from_parquet_file(absolute_path.clone(), &file);
+                match manifest_result {
+                    Ok(manifest) => {
+                        catalog::update_snapshot(store, stream, manifest).await?;
+                        if cache_enabled && cache_manager.is_some() {
+                            cache_updates
+                                .entry(stream)
+                                .or_default()
+                                .push((absolute_path, file));
+                        } else {
+                            let _ = fs::remove_file(file);
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Error while creating manifest from parquet file: {}", err);
+                    }
                 }
             }
         }

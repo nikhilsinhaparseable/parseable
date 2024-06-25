@@ -110,7 +110,7 @@ pub async fn append_temporary_events(
     Ok(event)
 }
 
-pub fn send_to_ingester(start: i64, end: i64) -> bool {
+pub fn send_to_ingestor(start: i64, end: i64) -> bool {
     let filter_start = lit_timestamp_milli(
         start, //query.start.timestamp_millis()
     );

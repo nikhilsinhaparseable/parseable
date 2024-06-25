@@ -320,8 +320,12 @@ impl TableProvider for StandardTableProvider {
                         .scan(state, projection, filters, limit)
                         .await?,
                 );
+                if CONFIG.parseable.mode == Mode::Ingest {
+                    return final_plan(vec![memory_exec], projection, self.schema.clone());
+                }
             }
         };
+
         let mut merged_snapshot: snapshot::Snapshot = Snapshot::default();
         if CONFIG.parseable.mode == Mode::Query {
             let path = RelativePathBuf::from_iter([&self.stream, STREAM_ROOT_DIRECTORY]);

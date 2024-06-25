@@ -141,7 +141,7 @@ impl WriterTable {
                 parsed_timestamp,
                 custom_partition_values,
             )?;
-        } else {
+        } else if !stream_writer.is_poisoned() && stream_writer.lock().is_ok(){
             stream_writer
                 .lock()
                 .unwrap()
@@ -196,11 +196,17 @@ impl WriterTable {
     }
 
     pub fn clear(&self, stream_name: &str) {
-        let map = self.write().unwrap();
-        if let Some(writer) = map.get(stream_name) {
-            let w = &mut writer.lock().unwrap().mem;
-            w.clear();
+        if !self.write().is_ok(){
+            let map = self.write().unwrap();
+            if let Some(writer) = map.get(stream_name) {
+                if writer.lock().is_ok(){
+                    let w = &mut writer.lock().unwrap().mem;
+                    w.clear();
+                }
+                
+            }
         }
+        
     }
 
     pub fn delete_stream(&self, stream_name: &str) {
@@ -208,12 +214,18 @@ impl WriterTable {
     }
 
     pub fn unset_all(&self) {
-        let mut table = self.write().unwrap();
-        let map = std::mem::take(&mut *table);
-        drop(table);
-        for writer in map.into_values() {
-            let writer = writer.into_inner().unwrap();
-            writer.disk.close_all();
+        if !self.is_poisoned() && self.write().is_ok(){
+            let mut table = self.write().unwrap();
+            let map = std::mem::take(&mut *table);
+            drop(table);
+            for writer in map.into_values() {
+                let writer_result = writer.into_inner();
+                if !writer_result.is_ok(){
+                    let writer = writer_result.unwrap();
+                    writer.disk.close_all();
+                }
+                
+            }
         }
     }
 
@@ -221,19 +233,23 @@ impl WriterTable {
         &self,
         stream_name: &str,
         schema: &Arc<Schema>,
-    ) -> Option<Vec<RecordBatch>> {
-        let records = self
-            .0
-            .read()
-            .unwrap()
-            .get(stream_name)?
-            .lock()
-            .unwrap()
-            .mem
-            .recordbatch_cloned(schema);
-
-        Some(records)
+    ) -> Option<Vec<RecordBatch>> 
+{
+        if !self.0.is_poisoned() && self.0.read().is_ok(){
+            let writer_guard = self
+                .0
+                .read()
+                .unwrap();
+            if let Some(writer) = writer_guard.get(stream_name) {
+                let writer = writer.lock();
+                if writer.is_ok(){
+                    let records = writer.unwrap().mem.recordbatch_cloned(schema);
+                    return Some(records);
+                } 
+            }
     }
+    return None;
+}
 }
 
 fn get_timestamp_array(size: usize) -> TimestampMillisecondArray {

@@ -39,7 +39,7 @@ use crate::utils::header_parsing::{collect_labelled_headers, ParseHeaderError};
 use crate::utils::json::convert_array_to_object;
 use actix_web::{http::header::ContentType, HttpRequest, HttpResponse};
 use arrow_array::RecordBatch;
-use arrow_schema::{Field, Schema};
+use arrow_schema::{ArrowError, Field, Schema};
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use http::StatusCode;
@@ -456,6 +456,23 @@ pub async fn create_stream_if_not_exists(
     Ok(())
 }
 
+/// all the records from the ingesters are concatinated into one event and pushed to memory
+// pub async fn append_temporary_events(
+//     stream_name: &str,
+//     minute_result: Vec<&RecordBatch>,
+// ) -> Result<Event, PostError> {
+//     let schema = STREAM_INFO.schema(stream_name).map_err(|err| {
+//         PostError::MetadataStreamError(MetadataError::StreamMetaNotFound(err.to_string()))
+//     })?;
+//     let rb = concat_batches(&schema, minute_result)
+//         .map_err(|err| PostError::ArrowError(ArrowError::ParquetError(err.to_string())))?;
+
+//     let event = push_logs_unchecked(rb, stream_name)
+//         .await
+//         .map_err(|err| PostError::CustomError(err.to_string()))?;
+//     Ok(event)
+// }
+
 #[derive(Debug, thiserror::Error)]
 pub enum PostError {
     #[error("Stream {0} not found")]
@@ -485,6 +502,8 @@ pub enum PostError {
     DashboardError(#[from] DashboardError),
     #[error("Error: {0}")]
     CacheError(#[from] CacheError),
+    #[error("Error: {0}")]
+    ArrowError(#[from] ArrowError),
 }
 
 impl actix_web::ResponseError for PostError {
@@ -506,6 +525,7 @@ impl actix_web::ResponseError for PostError {
             PostError::DashboardError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PostError::FiltersError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             PostError::CacheError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            PostError::ArrowError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 

@@ -20,19 +20,22 @@ use actix_web::http::header::ContentType;
 use actix_web::web::{self, Json};
 use actix_web::{FromRequest, HttpRequest, Responder};
 use anyhow::anyhow;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use datafusion::common::tree_node::TreeNode;
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::SessionState;
 use futures_util::Future;
 use http::StatusCode;
+use serde_json::json;
 use std::collections::HashMap;
+use std::ops::Sub;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::event::error::EventError;
 use crate::handlers::http::fetch_schema;
+use crate::utils::arrow::flight::{run_do_get_rpc, send_to_ingestor};
 use arrow_array::RecordBatch;
 
 use crate::event::commit_schema;
@@ -50,6 +53,10 @@ use crate::response::QueryResponse;
 use crate::storage::object_storage::commit_schema_to_storage;
 use crate::storage::ObjectStorageError;
 use crate::utils::actix::extract_session_key_from_req;
+
+use super::cluster::get_ingestor_info;
+use super::cluster::utils::check_liveness;
+use super::ingest::PostError;
 
 /// Query Request through http endpoint.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -81,43 +88,80 @@ pub async fn query(req: HttpRequest, query_request: Query) -> Result<impl Respon
         .top()
         .ok_or_else(|| QueryError::MalformedQuery("Table Name not found in SQL"))?;
 
-    let query_cache_manager = QueryCacheManager::global(CONFIG.parseable.query_cache_size)
+    let mut cache_results = None;
+    let mut user_id = None;
+    let mut query_cache_manager = None;
+    if CONFIG.parseable.mode != Mode::Ingest {
+        query_cache_manager = QueryCacheManager::global(CONFIG.parseable.query_cache_size)
+            .await
+            .unwrap_or(None);
+
+        cache_results = req
+            .headers()
+            .get(CACHE_RESULTS_HEADER_KEY)
+            .and_then(|value| value.to_str().ok());
+        let show_cached = req
+            .headers()
+            .get(CACHE_VIEW_HEADER_KEY)
+            .and_then(|value| value.to_str().ok());
+        user_id = req
+            .headers()
+            .get(USER_ID_HEADER_KEY)
+            .and_then(|value| value.to_str().ok());
+
+        // deal with cached data
+        if let Ok(results) = get_results_from_cache(
+            show_cached,
+            query_cache_manager,
+            stream,
+            user_id,
+            &query_request.start_time,
+            &query_request.end_time,
+            &query_request.query,
+            query_request.send_null,
+            query_request.fields,
+        )
         .await
-        .unwrap_or(None);
+        {
+            return results.to_http();
+        };
+    }
 
-    let cache_results = req
-        .headers()
-        .get(CACHE_RESULTS_HEADER_KEY)
-        .and_then(|value| value.to_str().ok());
-    let show_cached = req
-        .headers()
-        .get(CACHE_VIEW_HEADER_KEY)
-        .and_then(|value| value.to_str().ok());
-    let user_id = req
-        .headers()
-        .get(USER_ID_HEADER_KEY)
-        .and_then(|value| value.to_str().ok());
+    let mut minute_result = vec![];
+    let (start, end) = parse_human_time(&query_request.start_time, &query_request.end_time)?;
 
-    // deal with cached data
-    if let Ok(results) = get_results_from_cache(
-        show_cached,
-        query_cache_manager,
-        stream,
-        user_id,
-        &query_request.start_time,
-        &query_request.end_time,
-        &query_request.query,
-        query_request.send_null,
-        query_request.fields,
-    )
-    .await
-    {
-        return results.to_http();
+    if send_to_ingestor(start.timestamp_millis(), end.timestamp_millis()) {
+        let out_ticket = json!({
+            "query": &query_request.query,
+            "startTime": &query_request.start_time,
+            "endTime": &query_request.end_time,
+        })
+        .to_string();
+
+        let ingester_metadatas = get_ingestor_info()
+            .await
+            .map_err(|err| QueryError::Anyhow(anyhow!("Error getting ingestor info: {}", err)))?;
+
+        let mut minute_result: Vec<RecordBatch> = vec![];
+        for im in ingester_metadatas {
+            if !check_liveness(&im.domain_name).await {
+                continue;
+            }
+            if let Ok(mut batches) = run_do_get_rpc(im, out_ticket.clone()).await {
+                minute_result.append(&mut batches);
+            }
+        }
+    }
+    let (start, end) = exclude_current_minute(&query_request.start_time, &query_request.end_time)?;
+    let updated_query_request = Query {
+        query: query_request.query.clone(),
+        fields: query_request.fields,
+        filter_tags: query_request.filter_tags.clone(),
+        send_null: query_request.send_null,
+        start_time: start.to_rfc3339(),
+        end_time: end.to_rfc3339(),
     };
-
-    let tables = visitor.into_inner();
-    update_schema_when_distributed(tables).await?;
-    let mut query: LogicalQuery = into_query(&query_request, &session_state).await?;
+    let mut query: LogicalQuery = into_query(&updated_query_request, &session_state).await?;
 
     let creds = extract_session_key_from_req(&req)?;
     let permissions = Users.get_permissions(&creds);
@@ -129,22 +173,26 @@ pub async fn query(req: HttpRequest, query_request: Query) -> Result<impl Respon
     authorize_and_set_filter_tags(&mut query, permissions, &table_name)?;
 
     let time = Instant::now();
-    let (records, fields) = query.execute(table_name.clone()).await?;
-    // deal with cache saving
-    if let Err(err) = put_results_in_cache(
-        cache_results,
-        user_id,
-        query_cache_manager,
-        &table_name,
-        &records,
-        query.start.to_rfc3339(),
-        query.end.to_rfc3339(),
-        query_request.query,
-    )
-    .await
-    {
-        log::error!("{}", err);
-    };
+    let (mut records, fields) = query.execute(table_name.clone()).await?;
+    
+    records.append(&mut minute_result.clone());
+
+    if CONFIG.parseable.mode != Mode::Ingest {
+        if let Err(err) = put_results_in_cache(
+            cache_results,
+            user_id,
+            query_cache_manager,
+            &table_name,
+            &records,
+            query.start.to_rfc3339(),
+            query.end.to_rfc3339(),
+            query_request.query,
+        )
+        .await
+        {
+            log::error!("{}", err);
+        };
+    }
 
     let response = QueryResponse {
         records,
@@ -191,9 +239,7 @@ pub async fn put_results_in_cache(
 ) -> Result<(), QueryError> {
     match (cache_results, query_cache_manager) {
         (Some(_), None) => {
-            log::warn!(
-                "Instructed to cache query results but Query Caching is not Enabled in Server"
-            );
+            log::warn!("Cannot cache results as Query Caching is not enabled on the server.");
 
             Ok(())
         }
@@ -251,9 +297,7 @@ pub async fn get_results_from_cache(
 ) -> Result<QueryResponse, QueryError> {
     match (show_cached, query_cache_manager) {
         (Some(_), None) => {
-            log::warn!(
-                "Instructed to show cached results but Query Caching is not Enabled on Server"
-            );
+            log::warn!("Cannot show cached results as Query Caching is not enabled on the server.");
             None
         }
         (Some(should_show), Some(query_cache_manager)) => {
@@ -377,7 +421,6 @@ pub async fn into_query(
     if query.end_time.is_empty() {
         return Err(QueryError::EmptyEndTime);
     }
-
     let (start, end) = parse_human_time(&query.start_time, &query.end_time)?;
 
     if start.timestamp() > end.timestamp() {
@@ -414,6 +457,30 @@ fn parse_human_time(
     Ok((start, end))
 }
 
+fn exclude_current_minute(
+start_time: &str,
+    end_time: &str,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), QueryError> {
+    let mut end: DateTime<Utc>;
+    let start: DateTime<Utc>;
+    if end_time == "now" {
+        end = Utc::now();
+        start = end - chrono::Duration::from_std(humantime::parse_duration(start_time)?)?;
+        
+    }
+    else{
+        start = DateTime::parse_from_rfc3339(start_time)
+            .map_err(|_| QueryError::StartTimeParse)?
+            .into();
+        end = DateTime::parse_from_rfc3339(end_time)
+            .map_err(|_| QueryError::EndTimeParse)?
+            .into();
+    }
+    end = DateTime::sub(end, Duration::seconds(end.second() as i64));
+
+    Ok((start, end))
+
+}
 /// unused for now, might need it in the future
 #[allow(unused)]
 fn transform_query_for_ingestor(query: &Query) -> Option<Query> {
@@ -495,6 +562,8 @@ Description: {0}"#
     ActixError(#[from] actix_web::Error),
     #[error("Error: {0}")]
     Anyhow(#[from] anyhow::Error),
+    #[error("Error: {0}")]
+    PostError(#[from] PostError),
 }
 
 impl actix_web::ResponseError for QueryError {

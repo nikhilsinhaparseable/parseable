@@ -29,14 +29,14 @@ use tonic::codec::CompressionEncoding;
 
 use futures_util::{Future, TryFutureExt};
 
+use crate::handlers::http::cluster::get_ingestor_info;
+use crate::handlers::http::cluster::utils::check_liveness;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tonic_web::GrpcWebLayer;
 
-use crate::handlers::http::cluster::get_ingestor_info;
-
 use crate::handlers::{CACHE_RESULTS_HEADER_KEY, CACHE_VIEW_HEADER_KEY, USER_ID_HEADER_KEY};
 use crate::metrics::QUERY_EXECUTE_TIME;
-use crate::option::CONFIG;
+use crate::option::{Mode, CONFIG};
 
 use crate::handlers::livetail::cross_origin_config;
 
@@ -47,7 +47,7 @@ use crate::query::{TableScanVisitor, QUERY_SESSION};
 use crate::querycache::QueryCacheManager;
 use crate::utils::arrow::flight::{
     append_temporary_events, get_query_from_ticket, into_flight_data, run_do_get_rpc,
-    send_to_ingester,
+    send_to_ingestor,
 };
 use arrow_flight::{
     flight_service_server::FlightService, Action, ActionType, Criteria, Empty, FlightData,
@@ -134,8 +134,6 @@ impl FlightService for AirServiceImpl {
 
         let ticket = get_query_from_ticket(&req)?;
 
-        log::info!("query requested to airplane: {:?}", ticket);
-
         // get the query session_state
         let session_state = QUERY_SESSION.state();
 
@@ -153,50 +151,54 @@ impl FlightService for AirServiceImpl {
         let _ = raw_logical_plan.visit(&mut visitor);
 
         let streams = visitor.into_inner();
-
-        let query_cache_manager = QueryCacheManager::global(CONFIG.parseable.query_cache_size)
-            .await
-            .unwrap_or(None);
-
-        let cache_results = req
-            .metadata()
-            .get(CACHE_RESULTS_HEADER_KEY)
-            .and_then(|value| value.to_str().ok()); // I dont think we need to own this.
-
-        let show_cached = req
-            .metadata()
-            .get(CACHE_VIEW_HEADER_KEY)
-            .and_then(|value| value.to_str().ok());
-
-        let user_id = req
-            .metadata()
-            .get(USER_ID_HEADER_KEY)
-            .and_then(|value| value.to_str().ok());
         let stream_name = streams
             .first()
             .ok_or_else(|| Status::aborted("Malformed SQL Provided, Table Name Not Found"))?
             .to_owned();
+        let mut cache_results = None;
+        let mut user_id = None;
+        let mut query_cache_manager = None;
+        if CONFIG.parseable.mode != Mode::Ingest {
+            query_cache_manager = QueryCacheManager::global(CONFIG.parseable.query_cache_size)
+                .await
+                .unwrap_or(None);
 
-        // send the cached results
-        if let Ok(cache_results) = get_results_from_cache(
-            show_cached,
-            query_cache_manager,
-            &stream_name,
-            user_id,
-            &ticket.start_time,
-            &ticket.end_time,
-            &ticket.query,
-            ticket.send_null,
-            ticket.fields,
-        )
-        .await
-        {
-            return cache_results.into_flight();
-        }
+            cache_results = req
+                .metadata()
+                .get(CACHE_RESULTS_HEADER_KEY)
+                .and_then(|value| value.to_str().ok()); // I dont think we need to own this.
 
-        update_schema_when_distributed(streams)
+            let show_cached = req
+                .metadata()
+                .get(CACHE_VIEW_HEADER_KEY)
+                .and_then(|value| value.to_str().ok());
+
+            user_id = req
+                .metadata()
+                .get(USER_ID_HEADER_KEY)
+                .and_then(|value| value.to_str().ok());
+
+            // send the cached results
+            if let Ok(cache_results) = get_results_from_cache(
+                show_cached,
+                query_cache_manager,
+                &stream_name,
+                user_id,
+                &ticket.start_time,
+                &ticket.end_time,
+                &ticket.query,
+                ticket.send_null,
+                ticket.fields,
+            )
             .await
-            .map_err(|err| Status::internal(err.to_string()))?;
+            {
+                return cache_results.into_flight();
+            }
+
+            update_schema_when_distributed(streams)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+        }
 
         // map payload to query
         let mut query = into_query(&ticket, &session_state)
@@ -204,7 +206,7 @@ impl FlightService for AirServiceImpl {
             .map_err(|_| Status::internal("Failed to parse query"))?;
 
         let event =
-            if send_to_ingester(query.start.timestamp_millis(), query.end.timestamp_millis()) {
+            if send_to_ingestor(query.start.timestamp_millis(), query.end.timestamp_millis()) {
                 let sql = format!("select * from {}", &stream_name);
                 let start_time = ticket.start_time.clone();
                 let end_time = ticket.end_time.clone();
@@ -221,6 +223,9 @@ impl FlightService for AirServiceImpl {
                 let mut minute_result: Vec<RecordBatch> = vec![];
 
                 for im in ingester_metadatas {
+                    if !check_liveness(&im.domain_name).await {
+                        continue;
+                    }
                     if let Ok(mut batches) = run_do_get_rpc(im, out_ticket.clone()).await {
                         minute_result.append(&mut batches);
                     }
@@ -241,21 +246,22 @@ impl FlightService for AirServiceImpl {
             .execute(stream_name.clone())
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
-
-        if let Err(err) = put_results_in_cache(
-            cache_results,
-            user_id,
-            query_cache_manager,
-            &stream_name,
-            &records,
-            query.start.to_rfc3339(),
-            query.end.to_rfc3339(),
-            ticket.query,
-        )
-        .await
-        {
-            log::error!("{}", err);
-        };
+        if CONFIG.parseable.mode != Mode::Ingest {
+            if let Err(err) = put_results_in_cache(
+                cache_results,
+                user_id,
+                query_cache_manager,
+                &stream_name,
+                &records,
+                query.start.to_rfc3339(),
+                query.end.to_rfc3339(),
+                ticket.query,
+            )
+            .await
+            {
+                log::error!("{}", err);
+            };
+        }
 
         /*
         * INFO: No returning the schema with the data.
