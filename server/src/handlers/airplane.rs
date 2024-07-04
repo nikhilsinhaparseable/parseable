@@ -145,7 +145,10 @@ impl FlightService for AirServiceImpl {
             .await
             .map_err(|err| {
                 log::error!("Datafusion Error: Failed to create logical plan: {}", err);
-                Status::internal("Failed to create logical plan")
+                Status::internal(format!(
+                    "Datafusion Error: Failed to create logical plan: {}",
+                    err
+                ))
             })?;
 
         // create a visitor to extract the table name
