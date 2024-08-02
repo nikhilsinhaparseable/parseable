@@ -30,6 +30,7 @@ use crate::handlers::http::API_BASE_PATH;
 use crate::handlers::http::API_VERSION;
 use crate::localcache::LocalCacheManager;
 use crate::metrics;
+use crate::metrics::init_system_info_metrics_schedular;
 use crate::migration;
 use crate::rbac;
 use crate::storage;
@@ -539,6 +540,10 @@ impl Server {
 
         if CONFIG.parseable.send_analytics {
             analytics::init_analytics_scheduler()?;
+        }
+
+        if matches!(init_system_info_metrics_schedular(), Ok(())) {
+            log::info!("system info metrics scheduler started successfully");
         }
 
         tokio::spawn(handlers::livetail::server());

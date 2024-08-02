@@ -23,6 +23,7 @@ use crate::handlers::http::logstream;
 use crate::handlers::http::middleware::RouteExt;
 use crate::localcache::LocalCacheManager;
 use crate::metrics;
+use crate::metrics::init_system_info_metrics_schedular;
 use crate::migration;
 use crate::migration::metadata_migration::migrate_ingester_metadata;
 use crate::rbac;
@@ -338,6 +339,10 @@ impl IngestServer {
         CONFIG.storage().register_store_metrics(&prometheus);
 
         migration::run_migration(&CONFIG).await?;
+
+        if matches!(init_system_info_metrics_schedular(), Ok(())) {
+            log::info!("system info metrics scheduler started successfully");
+        }
 
         let (localsync_handler, mut localsync_outbox, localsync_inbox) = sync::run_local_sync();
         let (mut remote_sync_handler, mut remote_sync_outbox, mut remote_sync_inbox) =
