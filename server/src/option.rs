@@ -181,6 +181,10 @@ Cloud Native, log analytics platform for modern applications."#,
             Mode::All => "Standalone",
         }
     }
+
+    pub fn hot_tier_dir(&self) -> &Option<PathBuf> {
+        &self.parseable.hot_tier_storage_path
+    }
 }
 
 fn create_parseable_cli_command() -> Command {

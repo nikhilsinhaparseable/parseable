@@ -361,6 +361,24 @@ pub fn init_system_info_metrics_schedular() -> anyhow::Result<()> {
                         .set(staging_volume_available_disk as i64);
                 }
 
+                if let Some(hot_tier_dir) = CONFIG.hot_tier_dir(){
+                    if let (Some(hottier_volume_total_disk),
+                    Some(hottier_volume_used_disk),
+                    Some(hottier_volume_available_disk),) = get_volume_disk_usage(&hot_tier_dir){
+                        TOTAL_DISK
+                        .with_label_values(&["hottier"])
+                        .set(hottier_volume_total_disk as i64);
+                    USED_DISK
+                        .with_label_values(&["hottier"])
+                        .set(hottier_volume_used_disk as i64);
+                    AVAILABLE_DISK
+                        .with_label_values(&["hottier"])
+                        .set(hottier_volume_available_disk as i64);
+                    }
+                }
+
+                
+
                 if let (Some(memory), Some(used_memory), Some(total_swap), Some(used_swap)) =
                     get_memory_usage()
                 {
