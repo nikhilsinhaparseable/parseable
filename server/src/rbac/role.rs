@@ -25,6 +25,7 @@ pub enum Action {
     CreateStream,
     ListStream,
     GetStream,
+    GetStreamInfo,
     GetSchema,
     GetStats,
     DeleteStream,
@@ -116,6 +117,7 @@ impl RoleBuilder {
                 | Action::CreateStream
                 | Action::DeleteStream
                 | Action::GetStream
+                | Action::GetStreamInfo
                 | Action::ListStream
                 | Action::ListCluster
                 | Action::ListClusterMetrics
@@ -206,6 +208,7 @@ pub mod model {
                 Action::CreateStream,
                 Action::ListStream,
                 Action::GetStream,
+                Action::GetStreamInfo,
                 Action::GetSchema,
                 Action::GetStats,
                 Action::GetRetention,
@@ -227,18 +230,19 @@ pub mod model {
 
     fn writer_perm_builder() -> RoleBuilder {
         RoleBuilder {
-            actions: vec![
-                Action::Ingest,
+            actions: vec![       
                 Action::Query,
                 Action::ListStream,
                 Action::GetStream,
                 Action::GetSchema,
-                Action::GetStats,
-                Action::GetRetention,
+                Action::PutRetention,
                 Action::PutAlert,
                 Action::GetAlert,
-                Action::GetAbout,
-                Action::QueryLLM,
+                Action::PutRetention,
+                Action::GetRetention,
+                Action::PutHotTierEnabled,
+                Action::GetHotTierEnabled,
+                
             ],
             stream: None,
             tag: None,
@@ -257,7 +261,6 @@ pub mod model {
                 Action::GetAlert,
                 Action::GetAbout,
                 Action::QueryLLM,
-                Action::ListCluster,
                 Action::GetHotTierEnabled,
             ],
             stream: None,

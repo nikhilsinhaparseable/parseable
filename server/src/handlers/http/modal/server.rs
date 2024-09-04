@@ -280,7 +280,7 @@ impl Server {
                         web::resource("/info").route(
                             web::get()
                                 .to(logstream::get_stream_info)
-                                .authorize_for_stream(Action::GetStream),
+                                .authorize_for_stream(Action::GetStreamInfo),
                         ),
                     )
                     .service(
