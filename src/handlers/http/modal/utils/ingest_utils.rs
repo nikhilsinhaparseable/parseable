@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::{
     event::{
         self,
-        format::{self, EventFormat},
+        format::{self, EventFormat}, kubernetes_events::flatten_kubernetes_events_log,
     },
     handlers::{
         http::{ingest::PostError, kinesis, otel},
@@ -45,6 +45,7 @@ pub async fn flatten_and_push_logs(
     req: HttpRequest,
     body: Bytes,
     stream_name: String,
+    schema_type: Option<String>
 ) -> Result<(), PostError> {
     //flatten logs
     if let Some((_, log_source)) = req.headers().iter().find(|&(key, _)| key == LOG_SOURCE_KEY) {
@@ -64,7 +65,17 @@ pub async fn flatten_and_push_logs(
             let body: Bytes = serde_json::to_vec(record).unwrap().into();
             push_logs(stream_name.to_string(), req.clone(), body).await?;
         }
-    } else {
+    } else if schema_type.is_some() && schema_type.unwrap() == "kubernetes-events"{
+        if let Ok(result)=&flatten_kubernetes_events_log(&body).await{
+            let kubernetes_json = serde_json::to_vec(result).unwrap().into();
+            push_logs(stream_name.to_string(), req, kubernetes_json).await?;
+        }
+        else {
+            return Err(PostError::CustomError("Failed to flatten kubernetes events".to_string()));
+        }
+        
+    }
+     else {
         push_logs(stream_name.to_string(), req, body).await?;
     }
     Ok(())

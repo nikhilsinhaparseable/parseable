@@ -17,21 +17,25 @@
  */
 
 use super::logstream::error::{CreateStreamError, StreamError};
+use super::logstream::fetch_schema_from_event;
 use super::modal::utils::ingest_utils::{flatten_and_push_logs, push_logs};
 use super::otel;
 use super::users::dashboards::DashboardError;
 use super::users::filters::FiltersError;
+use crate::event::detect_schema::validate_schema_type;
+use crate::event::kubernetes_events::flatten_kubernetes_events_log;
 use crate::event::{
     self,
     error::EventError,
     format::{self, EventFormat},
 };
 use crate::handlers::http::modal::utils::logstream_utils::create_stream_and_schema_from_storage;
-use crate::handlers::{LOG_SOURCE_KEY, LOG_SOURCE_OTEL, STREAM_NAME_HEADER_KEY};
+use crate::handlers::{LOG_SOURCE_KEY, LOG_SOURCE_OTEL, SCHEMA_TYPE_KEY, STATIC_SCHEMA_FLAG, STREAM_NAME_HEADER_KEY};
 use crate::localcache::CacheError;
 use crate::metadata::error::stream_info::MetadataError;
 use crate::metadata::STREAM_INFO;
 use crate::option::{Mode, CONFIG};
+use crate::static_schema::{add_parseable_fields_to_static_schema, ParsedSchema, StaticSchema};
 use crate::storage::{ObjectStorageError, StreamType};
 use crate::utils::header_parsing::ParseHeaderError;
 use actix_web::{http::header::ContentType, HttpRequest, HttpResponse};
@@ -61,13 +65,22 @@ pub async fn ingest(req: HttpRequest, body: Bytes) -> Result<HttpResponse, PostE
                 stream_name
             )));
         }
-        create_stream_if_not_exists(&stream_name, &StreamType::UserDefined.to_string()).await?;
-
-        flatten_and_push_logs(req, body, stream_name).await?;
+        create_stream_if_not_exists(&stream_name, &StreamType::UserDefined.to_string(), &body).await?;
+        let schema_type = STREAM_INFO.schema_type(&stream_name)?;
+        flatten_and_push_logs(req, body, stream_name, schema_type).await?;
         Ok(HttpResponse::Ok().finish())
     } else {
         Err(PostError::Header(ParseHeaderError::MissingStreamName))
     }
+}
+
+pub fn check_known_schema(body: Bytes) -> Result<(String, Schema), StreamError> {
+    let schema = fetch_schema_from_event(body)?;
+    let known_schema_type = validate_schema_type(&schema);
+    if !known_schema_type.is_empty() {
+        return Ok((known_schema_type, schema));
+    }
+    Ok((String::default(), Schema::empty()))
 }
 
 pub async fn ingest_internal_stream(stream_name: String, body: Bytes) -> Result<(), PostError> {
@@ -114,7 +127,12 @@ pub async fn ingest_otel_logs(req: HttpRequest, body: Bytes) -> Result<HttpRespo
         .find(|&(key, _)| key == STREAM_NAME_HEADER_KEY)
     {
         let stream_name = stream_name.to_str().unwrap().to_owned();
-        create_stream_if_not_exists(&stream_name, &StreamType::UserDefined.to_string()).await?;
+        create_stream_if_not_exists(
+            &stream_name,
+            &StreamType::UserDefined.to_string(),
+            &body,
+        )
+        .await?;
 
         //flatten logs
         if let Some((_, log_source)) = req.headers().iter().find(|&(key, _)| key == LOG_SOURCE_KEY)
@@ -166,7 +184,7 @@ pub async fn post_event(req: HttpRequest, body: Bytes) -> Result<HttpResponse, P
         }
     }
 
-    flatten_and_push_logs(req, body, stream_name).await?;
+    flatten_and_push_logs(req, body, stream_name, None).await?;
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -194,7 +212,9 @@ pub async fn push_logs_unchecked(
 pub async fn create_stream_if_not_exists(
     stream_name: &str,
     stream_type: &str,
+    body: &Bytes
 ) -> Result<bool, PostError> {
+    
     let mut stream_exists = false;
     if STREAM_INFO.stream_exists(stream_name) {
         stream_exists = true;
@@ -221,6 +241,96 @@ pub async fn create_stream_if_not_exists(
     )
     .await?;
 
+    let mut static_schema_flag = "false";
+    
+    let (schema_type, mut schema) = if *body != Bytes::default() {
+        check_known_schema(body.clone())?
+    } else {
+        Ok::<(String, Schema), StreamError>((String::default(), Schema::empty()))?
+    };
+
+   
+
+    match &CONFIG.parseable.mode {
+        Mode::All | Mode::Query => {
+            let mut parseable_schema = Arc::new(Schema::empty());
+            if schema_type != String::default() {
+                static_schema_flag = "true";
+                if schema_type == *"kubernetes-events" {
+                    let flattened_logs = flatten_kubernetes_events_log(&body).await.unwrap();
+                    let kubernetes_json = serde_json::to_vec(&flattened_logs)?;
+                    let body = Bytes::from(kubernetes_json);
+                    schema = fetch_schema_from_event(body)?;
+                }
+                let parsed_schema = ParsedSchema::from(schema.clone());
+                parseable_schema = add_parseable_fields_to_static_schema(parsed_schema)?;
+            }
+
+            super::logstream::create_stream(
+                stream_name.to_string(),
+                "",
+                "",
+                "",
+                static_schema_flag,
+                parseable_schema,
+                stream_type,
+                &schema_type,
+            )
+            .await?;
+        }
+        Mode::Ingest => {
+            // here the ingest server has not found the stream
+            // so it should check if the stream exists in storage
+            let store = CONFIG.storage().get_object_store();
+            let streams = store.list_streams().await?;
+            if !streams.contains(&LogStream {
+                name: stream_name.to_owned(),
+            }) {
+                let mut headers = actix_web::http::header::HeaderMap::new();
+                let mut parseable_schema = StaticSchema::default();
+                if schema_type != String::default() {
+                    static_schema_flag = "true";
+                    if schema_type == *"kubernetes-events" {
+                        let flattened_logs = flatten_kubernetes_events_log(&body).await.unwrap();
+                        let kubernetes_json = serde_json::to_vec(&flattened_logs)?;
+                        let body = Bytes::from(kubernetes_json);
+                        schema = fetch_schema_from_event(body)?;
+                    }
+
+                    parseable_schema = StaticSchema::from(schema.clone());
+                    headers.insert(
+                        actix_web::http::header::HeaderName::from_static(STATIC_SCHEMA_FLAG),
+                        actix_web::http::header::HeaderValue::from_str(static_schema_flag).unwrap(),
+                    );
+                    headers.insert(
+                        actix_web::http::header::HeaderName::from_static(&SCHEMA_TYPE_KEY),
+                        actix_web::http::header::HeaderValue::from_str(&schema_type).unwrap(),
+                    );
+                }
+                
+                let schema_bytes = Bytes::from(serde_json::to_vec(&parseable_schema).unwrap());
+                match forward_create_stream_request(stream_name, headers, schema_bytes).await {
+                    Ok(()) => log::info!("Stream {} created", stream_name),
+                    Err(e) => {
+                        return Err(PostError::Invalid(anyhow::anyhow!(
+                            "Unable to create stream: {} using query server. Error: {}",
+                            stream_name,
+                            e.to_string(),
+                        )))
+                    }
+                };
+            }
+            metadata::STREAM_INFO
+                .upsert_stream_info(
+                    &*store,
+                    LogStream {
+                        name: stream_name.to_owned(),
+                    },
+                )
+                .await
+                .map_err(|_| PostError::StreamNotFound(stream_name.to_owned()))?;
+        }
+    }
     Ok(stream_exists)
 }
 

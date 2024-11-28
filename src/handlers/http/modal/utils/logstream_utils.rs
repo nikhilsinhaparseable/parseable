@@ -25,9 +25,7 @@ use http::StatusCode;
 
 use crate::{
     handlers::{
-        http::logstream::error::{CreateStreamError, StreamError},
-        CUSTOM_PARTITION_KEY, STATIC_SCHEMA_FLAG, STREAM_TYPE_KEY, TIME_PARTITION_KEY,
-        TIME_PARTITION_LIMIT_KEY, UPDATE_STREAM_KEY,
+        http::logstream::error::{CreateStreamError, StreamError}, CUSTOM_PARTITION_KEY, SCHEMA_TYPE_KEY, STATIC_SCHEMA_FLAG, STREAM_TYPE_KEY, TIME_PARTITION_KEY, TIME_PARTITION_LIMIT_KEY, UPDATE_STREAM_KEY
     },
     metadata::{self, STREAM_INFO},
     option::{Mode, CONFIG},
@@ -48,9 +46,18 @@ pub async fn create_update_stream(
         static_schema_flag,
         update_stream_flag,
         stream_type,
+        schema_type
     ) = fetch_headers_from_put_stream_request(req);
+<<<<<<< HEAD:src/handlers/http/modal/utils/logstream_utils.rs
 
     if metadata::STREAM_INFO.stream_exists(stream_name) && update_stream_flag != "true" {
+=======
+    println!(
+        "time_partition: {}, time_partition_limit: {}, custom_partition: {}, static_schema_flag: {}, update_stream: {}, stream_type: {}",
+        time_partition, time_partition_limit, custom_partition, static_schema_flag, update_stream, stream_type
+    );
+    if metadata::STREAM_INFO.stream_exists(stream_name) && update_stream != "true" {
+>>>>>>> 9cf8f6a (temp):server/src/handlers/http/modal/utils/logstream_utils.rs
         return Err(StreamError::Custom {
             msg: format!(
                 "Logstream {stream_name} already exists, please create a new log stream with unique name"
@@ -113,6 +120,7 @@ pub async fn create_update_stream(
         &static_schema_flag,
         schema,
         &stream_type,
+        &schema_type,
     )
     .await?;
 
@@ -166,13 +174,14 @@ async fn validate_and_update_custom_partition(
 
 pub fn fetch_headers_from_put_stream_request(
     req: &HttpRequest,
-) -> (String, String, String, String, String, String) {
+) -> (String, String, String, String, String, String, String) {
     let mut time_partition = String::default();
     let mut time_partition_limit = String::default();
     let mut custom_partition = String::default();
     let mut static_schema_flag = String::default();
     let mut update_stream = String::default();
     let mut stream_type = StreamType::UserDefined.to_string();
+    let mut schema_type = String::default();
     req.headers().iter().for_each(|(key, value)| {
         if key == TIME_PARTITION_KEY {
             time_partition = value.to_str().unwrap().to_string();
@@ -192,6 +201,9 @@ pub fn fetch_headers_from_put_stream_request(
         if key == STREAM_TYPE_KEY {
             stream_type = value.to_str().unwrap().to_string();
         }
+        if key == SCHEMA_TYPE_KEY {
+            schema_type = value.to_str().unwrap().to_string();
+        }
     });
 
     (
@@ -201,6 +213,7 @@ pub fn fetch_headers_from_put_stream_request(
         static_schema_flag,
         update_stream,
         stream_type,
+        schema_type,
     )
 }
 
@@ -268,7 +281,6 @@ pub fn validate_static_schema(
                 status: StatusCode::BAD_REQUEST,
             });
         }
-
         let static_schema: StaticSchema = serde_json::from_slice(body)?;
         let parsed_schema =
             convert_static_schema_to_arrow_schema(static_schema, time_partition, custom_partition)
@@ -377,6 +389,7 @@ pub async fn update_custom_partition_in_stream(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_stream(
     stream_name: String,
     time_partition: &str,
@@ -385,6 +398,7 @@ pub async fn create_stream(
     static_schema_flag: &str,
     schema: Arc<Schema>,
     stream_type: &str,
+    schema_type: &str,
 ) -> Result<(), CreateStreamError> {
     // fail to proceed if invalid stream name
     if stream_type != StreamType::Internal.to_string() {
@@ -402,6 +416,7 @@ pub async fn create_stream(
             static_schema_flag,
             schema.clone(),
             stream_type,
+            schema_type,
         )
         .await
     {
@@ -425,6 +440,7 @@ pub async fn create_stream(
                 static_schema_flag.to_string(),
                 static_schema,
                 stream_type,
+                schema_type,
             );
         }
         Err(err) => {

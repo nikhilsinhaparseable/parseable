@@ -59,7 +59,6 @@ impl EventFormat for Event {
             value @ Value::Object(_) => vec![value],
             _ => unreachable!("flatten would have failed beforehand"),
         };
-
         // collect all the keys from all the json objects in the request body
         let fields =
             collect_keys(value_arr.iter()).expect("fields can be collected from array of objects");
@@ -69,6 +68,7 @@ impl EventFormat for Event {
             Ok(schema) => schema,
             Err(_) => match infer_json_schema_from_iterator(value_arr.iter().map(Ok)) {
                 Ok(mut infer_schema) => {
+                    println!("infer_schema: {:?}", infer_schema);
                     let new_infer_schema = super::super::format::update_field_type_in_schema(
                         Arc::new(infer_schema),
                         Some(&stream_schema),

@@ -842,3 +842,70 @@ pub fn init_cluster_metrics_schedular() -> Result<(), PostError> {
 
     Ok(())
 }
+
+pub async fn forward_create_stream_request(stream_name: &str, headers: HeaderMap,
+    body: Bytes,) -> Result<(), StreamError> {
+    let client = reqwest::Client::new();
+    let staging_metadata = get_staging_metadata().unwrap().ok_or_else(|| {
+        StreamError::Anyhow(anyhow::anyhow!("Failed to retrieve staging metadata"))
+    })?;
+    let querier_endpoint = to_url_string(staging_metadata.querier_endpoint.unwrap());
+    let token = staging_metadata.querier_auth_token.unwrap();
+
+    if !check_liveness(&querier_endpoint).await {
+        log::warn!("Querier {} is not live", querier_endpoint);
+        return Err(StreamError::Anyhow(anyhow::anyhow!("Querier is not live")));
+    }
+
+    let mut reqwest_headers = http_header::HeaderMap::new();
+
+    for (key, value) in headers.iter() {
+        reqwest_headers.insert(key.clone(), value.clone());
+    }
+
+    let url = format!(
+        "{}{}/logstream/{}?skip_ingestors={}",
+        querier_endpoint,
+        base_path_without_preceding_slash(),
+        stream_name,
+        CONFIG.parseable.ingestor_endpoint,
+    );
+
+    let response = client
+        .put(&url)
+        .header(header::AUTHORIZATION, &token)
+        .headers(reqwest_headers.clone())
+        .body(body.clone())
+        .send()
+        .await
+        .map_err(|err| {
+            log::error!(
+                "Fatal: failed to forward create stream request to querier: {}\n Error: {:?}",
+                &url,
+                err
+            );
+            StreamError::Network(err)
+        })?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        let response_text = response.text().await.map_err(|err| {
+            log::error!("Failed to read response text from querier: {}", &url);
+            StreamError::Network(err)
+        })?;
+
+        log::error!(
+            "Failed to forward create stream request to querier: {}\nResponse Returned: {:?}",
+            &url,
+            response_text
+        );
+
+        return Err(StreamError::Anyhow(anyhow::anyhow!(
+            "Request failed with status: {}",
+            status,
+        )));
+    }
+
+    Ok(())
+}

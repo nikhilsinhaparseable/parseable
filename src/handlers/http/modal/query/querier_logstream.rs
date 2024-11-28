@@ -111,8 +111,12 @@ pub async fn put_stream(req: HttpRequest, body: Bytes) -> Result<impl Responder,
 
     let _ = CREATE_STREAM_LOCK.lock().await;
     let headers = create_update_stream(&req, &body, &stream_name).await?;
+<<<<<<< HEAD:src/handlers/http/modal/query/querier_logstream.rs
 
     sync_streams_with_ingestors(headers, body, &stream_name).await?;
+=======
+    sync_streams_with_ingestors(headers, body, &stream_name, info.skip_ingestors.clone()).await?;
+>>>>>>> 9cf8f6a (temp):server/src/handlers/http/modal/query/querier_logstream.rs
 
     Ok(("Log stream created", StatusCode::OK))
 }

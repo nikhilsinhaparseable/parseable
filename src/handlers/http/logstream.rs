@@ -24,6 +24,7 @@ use super::modal::utils::logstream_utils::{
     create_stream_and_schema_from_storage, create_update_stream,
 };
 use crate::alerts::Alerts;
+use crate::event::detect_schema::validate_schema_type;
 use crate::event::format::update_data_type_to_datetime;
 use crate::handlers::STREAM_TYPE_KEY;
 use crate::hottier::{HotTierManager, StreamHotTier, CURRENT_HOT_TIER_VERSION};
@@ -33,12 +34,13 @@ use crate::option::{Mode, CONFIG};
 use crate::stats::{event_labels_date, storage_size_labels_date, Stats};
 use crate::storage::StreamType;
 use crate::storage::{retention::Retention, StorageDir, StreamInfo};
+use crate::utils::json::flatten_json_body;
 use crate::{catalog, event, stats};
 
 use crate::{metadata, validator};
 use actix_web::http::header::{self, HeaderMap};
 use actix_web::http::StatusCode;
-use actix_web::{web, HttpRequest, Responder};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use arrow_json::reader::infer_json_schema_from_iterator;
 use arrow_schema::{Field, Schema};
 use bytes::Bytes;
@@ -96,23 +98,12 @@ pub async fn list(_: HttpRequest) -> impl Responder {
 }
 
 pub async fn detect_schema(body: Bytes) -> Result<impl Responder, StreamError> {
-    let body_val: Value = serde_json::from_slice(&body)?;
-    let log_records: Vec<Value> = match body_val {
-        Value::Array(arr) => arr,
-        value @ Value::Object(_) => vec![value],
-        _ => {
-            return Err(StreamError::Custom {
-                msg: "please send json events as part of the request".to_string(),
-                status: StatusCode::BAD_REQUEST,
-            })
-        }
-    };
-
-    let mut schema = infer_json_schema_from_iterator(log_records.iter().map(Ok)).unwrap();
-    for log_record in log_records {
-        schema = update_data_type_to_datetime(schema, log_record, Vec::new());
-    }
-    Ok((web::Json(schema), StatusCode::OK))
+    let schema = fetch_schema_from_event(body)?;
+    let known_schema_type = validate_schema_type(&schema);
+    Ok(HttpResponse::Ok()
+        .insert_header((header::CONTENT_TYPE, "application/json"))
+        .insert_header(("X-P-Schema-Type", known_schema_type))
+        .json(schema))
 }
 
 pub async fn schema(req: HttpRequest) -> Result<impl Responder, StreamError> {
@@ -501,6 +492,7 @@ fn remove_id_from_alerts(value: &mut Value) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_stream(
     stream_name: String,
     time_partition: &str,
@@ -509,6 +501,7 @@ pub async fn create_stream(
     static_schema_flag: &str,
     schema: Arc<Schema>,
     stream_type: &str,
+    schema_type: &str,
 ) -> Result<(), CreateStreamError> {
     // fail to proceed if invalid stream name
     if stream_type != StreamType::Internal.to_string() {
@@ -526,6 +519,7 @@ pub async fn create_stream(
             static_schema_flag,
             schema.clone(),
             stream_type,
+            schema_type,
         )
         .await
     {
@@ -549,6 +543,7 @@ pub async fn create_stream(
                 static_schema_flag.to_string(),
                 static_schema,
                 stream_type,
+                schema_type,
             );
         }
         Err(err) => {
@@ -598,6 +593,7 @@ pub async fn get_stream_info(req: HttpRequest) -> Result<impl Responder, StreamE
         custom_partition: stream_meta.custom_partition.clone(),
         cache_enabled: stream_meta.cache_enabled,
         static_schema_flag: stream_meta.static_schema_flag.clone(),
+        schema_type: stream_meta.schema_type.clone(),
     };
 
     // get the other info from
@@ -740,8 +736,12 @@ pub async fn delete_stream_hot_tier(req: HttpRequest) -> Result<impl Responder, 
 }
 
 pub async fn create_internal_stream_if_not_exists() -> Result<(), StreamError> {
-    if let Ok(stream_exists) =
-        create_stream_if_not_exists(INTERNAL_STREAM_NAME, &StreamType::Internal.to_string()).await
+    if let Ok(stream_exists) = create_stream_if_not_exists(
+        INTERNAL_STREAM_NAME,
+        &StreamType::Internal.to_string(),
+        &Bytes::default(),
+    )
+    .await
     {
         if stream_exists {
             return Ok(());
@@ -758,6 +758,28 @@ pub async fn create_internal_stream_if_not_exists() -> Result<(), StreamError> {
         sync_streams_with_ingestors(header_map, Bytes::new(), INTERNAL_STREAM_NAME).await?;
     }
     Ok(())
+}
+
+pub fn fetch_schema_from_event(body: Bytes) -> Result<Schema, StreamError> {
+    let body_val: Value = serde_json::from_slice(&body)?;
+    let flattened_body = flatten_json_body(body_val, None, None, None, false)?;
+    let log_records: Vec<Value> = match flattened_body {
+        Value::Array(arr) => arr,
+        value @ Value::Object(_) => vec![value],
+        _ => {
+            return Err(StreamError::Custom {
+                msg: "please send json events as part of the request".to_string(),
+                status: StatusCode::BAD_REQUEST,
+            })
+        }
+    };
+
+    let mut schema = infer_json_schema_from_iterator(log_records.iter().map(Ok)).unwrap();
+    for log_record in log_records {
+        schema = update_data_type_to_datetime(schema, log_record, Vec::new());
+    }
+
+    Ok(schema)
 }
 #[allow(unused)]
 fn classify_json_error(kind: serde_json::error::Category) -> StatusCode {

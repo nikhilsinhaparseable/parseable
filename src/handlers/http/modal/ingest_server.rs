@@ -24,6 +24,7 @@ use super::IngestorMetadata;
 use super::OpenIdClient;
 use super::ParseableServer;
 use crate::analytics;
+use crate::event::detect_schema::detect_schema;
 use crate::handlers::airplane;
 use crate::handlers::http::ingest;
 use crate::handlers::http::logstream;
@@ -396,5 +397,60 @@ impl IngestServer {
         }
 
         Ok(())
+    }
+
+    async fn initialize(&self) -> anyhow::Result<()> {
+        // ! Undefined and Untested behaviour
+        if let Some(cache_manager) = LocalCacheManager::global() {
+            cache_manager
+                .validate(CONFIG.parseable.local_cache_size)
+                .await?;
+        };
+
+        let prometheus = metrics::build_metrics_handler();
+        CONFIG.storage().register_store_metrics(&prometheus);
+
+        migration::run_migration(&CONFIG).await?;
+
+        detect_schema();
+        let (localsync_handler, mut localsync_outbox, localsync_inbox) =
+            sync::run_local_sync().await;
+        let (mut remote_sync_handler, mut remote_sync_outbox, mut remote_sync_inbox) =
+            sync::object_store_sync().await;
+
+        tokio::spawn(airplane::server());
+
+        let app = self.start(prometheus, CONFIG.parseable.openid.clone());
+
+        tokio::pin!(app);
+        loop {
+            tokio::select! {
+                e = &mut app => {
+                    // actix server finished .. stop other threads and stop the server
+                    remote_sync_inbox.send(()).unwrap_or(());
+                    localsync_inbox.send(()).unwrap_or(());
+                    if let Err(e) = localsync_handler.await {
+                        log::error!("Error joining remote_sync_handler: {:?}", e);
+                    }
+                    if let Err(e) = remote_sync_handler.await {
+                        log::error!("Error joining remote_sync_handler: {:?}", e);
+                    }
+                    return e
+                },
+                _ = &mut localsync_outbox => {
+                    // crash the server if localsync fails for any reason
+                    // panic!("Local Sync thread died. Server will fail now!")
+                    return Err(anyhow::Error::msg("Failed to sync local data to drive. Please restart the Parseable server.\n\nJoin us on Parseable Slack if the issue persists after restart : https://launchpass.com/parseable"))
+                },
+                _ = &mut remote_sync_outbox => {
+                    // remote_sync failed, this is recoverable by just starting remote_sync thread again
+                    if let Err(e) = remote_sync_handler.await {
+                        log::error!("Error joining remote_sync_handler: {:?}", e);
+                    }
+                    (remote_sync_handler, remote_sync_outbox, remote_sync_inbox) = sync::object_store_sync().await;
+                }
+
+            };
+        }
     }
 }

@@ -31,6 +31,7 @@ const TIME_PARTITION_KEY: &str = "x-p-time-partition";
 const TIME_PARTITION_LIMIT_KEY: &str = "x-p-time-partition-limit";
 const CUSTOM_PARTITION_KEY: &str = "x-p-custom-partition";
 const STATIC_SCHEMA_FLAG: &str = "x-p-static-schema-flag";
+const SCHEMA_TYPE_KEY: &str = "x-p-schema-type";
 const AUTHORIZATION_KEY: &str = "authorization";
 const SEPARATOR: char = '^';
 const UPDATE_STREAM_KEY: &str = "x-p-update-stream";
