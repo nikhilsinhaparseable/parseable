@@ -90,42 +90,10 @@ pub enum KafkaError {
     DoNotPrintError,
 }
 
-// // Commented out functions
-// // Might come in handy later
-// fn parse_auto_env<T>(key: &'static str) -> Result<Option<T>, <T as FromStr>::Err>
-// where
-//     T: FromStr,
-// {
-//     Ok(if let Ok(val) = env::var(key) {
-//         Some(val.parse::<T>()?)
-//     } else {
-//         None
-//     })
-// }
-
-// fn handle_duration_env_prefix(key: &'static str) -> Result<Option<Duration>, ParseIntError> {
-//     if let Ok(raw_secs) = env::var(format!("{key}_S")) {
-//         Ok(Some(Duration::from_secs(u64::from_str(&raw_secs)?)))
-//     } else if let Ok(raw_secs) = env::var(format!("{key}_M")) {
-//         Ok(Some(Duration::from_secs(u64::from_str(&raw_secs)? * 60)))
-//     } else {
-//         Ok(None)
-//     }
-// }
-
-// fn parse_i32_env(key: &'static str) -> Result<Option<i32>, KafkaError> {
-//     parse_auto_env::<i32>(key).map_err(|raw| KafkaError::ParseIntError(key, raw))
-// }
-
-// fn parse_duration_env_prefixed(key_prefix: &'static str) -> Result<Option<Duration>, KafkaError> {
-//     handle_duration_env_prefix(key_prefix)
-//         .map_err(|raw| KafkaError::ParseDurationError(key_prefix, raw))
-// }
-
 fn setup_consumer() -> Result<(StreamConsumer, Vec<String>), KafkaError> {
     if let Some(topics) = &CONFIG.parseable.kafka_topics {
         // topics can be a comma separated list of topics to subscribe to
-        let topics = topics.split(",").map(|v| v.to_owned()).collect_vec();
+        let topics = topics.split(',').map(|v| v.to_owned()).collect_vec();
 
         let host = if CONFIG.parseable.kafka_host.is_some() {
             CONFIG.parseable.kafka_host.as_ref()
@@ -147,10 +115,6 @@ fn setup_consumer() -> Result<(StreamConsumer, Vec<String>), KafkaError> {
             conf.set("client.id", val);
         }
 
-        // if let Some(val) = get_flag_env_val("a")? {
-        //     conf.set("api.version.request", val.to_string());
-        // }
-
         if let Some(ssl_protocol) = CONFIG.parseable.kafka_security_protocol.as_ref() {
             conf.set("security.protocol", serde_json::to_string(&ssl_protocol)?);
         }
@@ -162,8 +126,8 @@ fn setup_consumer() -> Result<(StreamConsumer, Vec<String>), KafkaError> {
             // partitions is a comma separated pairs of topic:partitions
             let mut topic_partition_pairs = Vec::new();
             let mut set = true;
-            for vals in vals_raw.split(",") {
-                let intermediate = vals.split(":").collect_vec();
+            for vals in vals_raw.split(',') {
+                let intermediate = vals.split(':').collect_vec();
                 if intermediate.len() != 2 {
                     warn!(
                         "Value for P_KAFKA_PARTITIONS is incorrect! Skipping setting partitions!"
