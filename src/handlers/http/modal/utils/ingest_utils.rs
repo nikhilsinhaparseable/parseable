@@ -35,7 +35,13 @@ use crate::{
         Event,
     },
     handlers::{
-        http::{ingest::PostError, kinesis, otel_logs, otel_metrics, otel_traces},
+        http::{
+            ingest::PostError,
+            kinesis,
+            otel::{
+                logs::flatten_otel_logs, metrics::flatten_otel_metrics, traces::flatten_otel_traces,
+            },
+        },
         LOG_SOURCE_KEY, LOG_SOURCE_KINESIS, LOG_SOURCE_OTEL_LOGS, LOG_SOURCE_OTEL_METRICS,
         LOG_SOURCE_OTEL_TRACES, PREFIX_META, PREFIX_TAGS, SEPARATOR,
     },
@@ -58,17 +64,17 @@ pub async fn flatten_and_push_logs(
 
             //custom flattening required for otel logs
             LOG_SOURCE_OTEL_LOGS => {
-                json = otel_logs::flatten_otel_logs(&body);
+                json = flatten_otel_logs(&body);
             }
 
             //custom flattening required for otel metrics
             LOG_SOURCE_OTEL_METRICS => {
-                json = otel_metrics::flatten_otel_metrics(&body);
+                json = flatten_otel_metrics(&body);
             }
 
             //custom flattening required for otel traces
             LOG_SOURCE_OTEL_TRACES => {
-                json = otel_traces::flatten_otel_traces(&body);
+                json = flatten_otel_traces(&body);
             }
             _ => {
                 tracing::warn!("Unknown log source: {}", log_source);
