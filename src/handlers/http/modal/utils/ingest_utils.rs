@@ -16,16 +16,15 @@
  *
  */
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
-
 use actix_web::HttpRequest;
 use arrow_schema::Field;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use crate::{
     event::{
