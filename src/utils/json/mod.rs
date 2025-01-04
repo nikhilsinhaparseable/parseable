@@ -21,6 +21,7 @@ use std::num::NonZeroU32;
 use serde_json;
 use serde_json::Value;
 
+use crate::event::format::LogSource;
 use crate::metadata::SchemaVersion;
 
 pub mod flatten;
@@ -32,9 +33,13 @@ pub fn flatten_json_body(
     custom_partition: Option<&String>,
     schema_version: SchemaVersion,
     validation_required: bool,
-    log_source: &str,
+    log_source: &LogSource,
 ) -> Result<Value, anyhow::Error> {
-    let mut nested_value = if schema_version == SchemaVersion::V1 && !log_source.contains("otel") {
+    let mut nested_value = if schema_version == SchemaVersion::V1
+        && matches!(
+            log_source,
+            LogSource::OtelLogs | LogSource::OtelMetrics | LogSource::OtelTraces
+        ) {
         flatten::generic_flattening(body)?
     } else {
         body
@@ -58,7 +63,7 @@ pub fn convert_array_to_object(
     time_partition_limit: Option<NonZeroU32>,
     custom_partition: Option<&String>,
     schema_version: SchemaVersion,
-    log_source: &str,
+    log_source: &LogSource,
 ) -> Result<Vec<Value>, anyhow::Error> {
     let data = flatten_json_body(
         body,
