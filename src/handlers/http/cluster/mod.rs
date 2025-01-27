@@ -38,7 +38,7 @@ use actix_web::http::header::{self, HeaderMap};
 use actix_web::web::Path;
 use actix_web::Responder;
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use http::{header as http_header, StatusCode};
 use itertools::Itertools;
 use relative_path::RelativePathBuf;
@@ -534,11 +534,11 @@ pub async fn send_retention_cleanup_request(
     url: &str,
     ingestor: IngestorMetadata,
     dates: &Vec<String>,
-) -> Result<String, ObjectStorageError> {
-    let mut first_event_at: String = String::default();
+) -> Result<Option<DateTime<Utc>>, ObjectStorageError> {
     if !utils::check_liveness(&ingestor.domain_name).await {
-        return Ok(first_event_at);
+        return Ok(None);
     }
+    
     let resp = HTTP_CLIENT
         .post(url)
         .header(header::CONTENT_TYPE, "application/json")
@@ -565,13 +565,13 @@ pub async fn send_retention_cleanup_request(
         );
     }
 
-    let resp_data = resp.bytes().await.map_err(|err| {
+    let first_event_at: String = resp.json().await.map_err(|err| {
         error!("Fatal: failed to parse response to bytes: {:?}", err);
         ObjectStorageError::Custom(err.to_string())
     })?;
+    let first_event_at = DateTime::parse_from_rfc3339(&first_event_at)?.to_utc();
 
-    first_event_at = String::from_utf8_lossy(&resp_data).to_string();
-    Ok(first_event_at)
+    Ok(Some(first_event_at))
 }
 
 pub async fn get_cluster_info() -> Result<impl Responder, StreamError> {

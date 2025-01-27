@@ -21,7 +21,7 @@ use super::cluster::utils::{merge_quried_stats, IngestionStats, QueriedStats, St
 use super::cluster::{sync_streams_with_ingestors, INTERNAL_STREAM_NAME};
 use super::ingest::create_stream_if_not_exists;
 use super::modal::utils::logstream_utils::{
-    create_stream_and_schema_from_storage, create_update_stream, update_first_event_at,
+    create_stream_and_schema_from_storage, create_update_stream,
 };
 use super::query::update_schema_when_distributed;
 use crate::alerts::Alerts;
@@ -56,7 +56,7 @@ use std::fs;
 use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{error, warn};
 
 pub async fn delete(stream_name: Path<String>) -> Result<impl Responder, StreamError> {
     let stream_name = stream_name.into_inner();
@@ -552,16 +552,33 @@ pub async fn get_stream_info(stream_name: Path<String>) -> Result<impl Responder
     let storage = CONFIG.storage().get_object_store();
     // if first_event_at is not found in memory map, check if it exists in the storage
     // if it exists in the storage, update the first_event_at in memory map
-    let stream_first_event_at =
-        if let Ok(Some(first_event_at)) = STREAM_INFO.get_first_event(&stream_name) {
-            Some(first_event_at)
-        } else if let Ok(Some(first_event_at)) =
-            storage.get_first_event_from_storage(&stream_name).await
+    let stream_first_event_at = if let Ok(Some(first_event_at)) =
+        STREAM_INFO.get_first_event(&stream_name)
+    {
+        Some(first_event_at.to_rfc3339())
+    } else if let Ok(Some(first_event_at)) =
+        storage.get_first_event_from_storage(&stream_name).await
+    {
+        if let Err(err) = storage
+            .update_first_event_in_stream(&stream_name, first_event_at)
+            .await
         {
-            update_first_event_at(&stream_name, &first_event_at).await
-        } else {
-            None
-        };
+            error!(
+                "Failed to update first_event_at in storage for stream {:?}: {err:?}",
+                stream_name
+            );
+        }
+
+        if let Err(err) = metadata::STREAM_INFO.set_first_event_at(&stream_name, first_event_at) {
+            error!(
+                "Failed to update first_event_at in stream info for stream {:?}: {err:?}",
+                stream_name
+            );
+        }
+        Some(first_event_at.to_rfc3339())
+    } else {
+        None
+    };
 
     let hash_map = STREAM_INFO.read().unwrap();
     let stream_meta = &hash_map

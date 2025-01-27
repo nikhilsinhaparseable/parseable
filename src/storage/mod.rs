@@ -258,4 +258,6 @@ pub enum ObjectStorageError {
     PathError(relative_path::FromPathError),
     #[error("Error: {0}")]
     MetadataError(#[from] MetadataError),
+    #[error("Error parsing datetime: {0}")]
+    Chrono(#[from] chrono::ParseError),
 }

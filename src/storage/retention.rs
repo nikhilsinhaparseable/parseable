@@ -171,7 +171,6 @@ impl From<Retention> for Vec<TaskView> {
 }
 
 mod action {
-    use crate::catalog::remove_manifest_from_snapshot;
     use crate::{metadata, option::CONFIG};
     use chrono::{Days, NaiveDate, Utc};
     use futures::{stream::FuturesUnordered, StreamExt};
@@ -197,7 +196,7 @@ mod action {
         if !dates.is_empty() {
             let delete_tasks = FuturesUnordered::new();
             let res_remove_manifest =
-                remove_manifest_from_snapshot(store.clone(), &stream_name, dates.clone()).await;
+                store.remove_manifest_from_snapshot( &stream_name, dates.clone()).await;
 
             for date in dates_to_delete {
                 let path = RelativePathBuf::from_iter([&stream_name, &date]);
@@ -220,7 +219,7 @@ mod action {
             }
             if let Ok(Some(first_event_at)) = res_remove_manifest {
                 if let Err(err) =
-                    metadata::STREAM_INFO.set_first_event_at(&stream_name, &first_event_at)
+                    metadata::STREAM_INFO.set_first_event_at(&stream_name, first_event_at)
                 {
                     error!(
                         "Failed to update first_event_at in streaminfo for stream {:?} {err:?}",

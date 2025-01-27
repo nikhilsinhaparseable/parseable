@@ -25,7 +25,6 @@ use http::StatusCode;
 use tracing::warn;
 
 use crate::{
-    catalog::remove_manifest_from_snapshot,
     event,
     handlers::http::{
         logstream::error::StreamError,
@@ -55,8 +54,12 @@ pub async fn retention_cleanup(
         return Err(StreamError::StreamNotFound(stream_name.clone()));
     }
 
-    let res = remove_manifest_from_snapshot(storage.clone(), &stream_name, date_list).await;
-    let first_event_at: Option<String> = res.unwrap_or_default();
+    let first_event_at = storage
+        .remove_manifest_from_snapshot(&stream_name, date_list)
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.to_rfc3339());
 
     Ok((first_event_at, StatusCode::OK))
 }

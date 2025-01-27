@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use itertools::Itertools;
 use parquet::{file::reader::FileReader, format::SortingColumn};
 
-use super::column::Column;
+use super::{column::{Column, TypedStatistics}, ManifestFile};
 
 #[derive(
     Debug,
@@ -56,6 +57,29 @@ pub struct File {
     pub ingestion_size: u64,
     pub columns: Vec<Column>,
     pub sort_order_id: Vec<SortInfo>,
+}
+
+impl File {
+    pub fn get_file_bounds(
+        &self,
+        partition_column: &str,
+    ) -> (DateTime<Utc>, DateTime<Utc>) {
+        match self
+            .columns()
+            .iter()
+            .find(|col| col.name == partition_column)
+            .unwrap()
+            .stats
+            .as_ref()
+            .unwrap()
+        {
+            TypedStatistics::Int(stats) => (
+                DateTime::from_timestamp_millis(stats.min).unwrap(),
+                DateTime::from_timestamp_millis(stats.max).unwrap(),
+            ),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// A manifest file composed of multiple file entries.

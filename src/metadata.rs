@@ -18,7 +18,7 @@
 
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Fields, Schema, TimeUnit};
-use chrono::{Local, NaiveDateTime};
+use chrono::{DateTime, Local, NaiveDateTime, Utc};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,7 @@ pub struct LogStreamMetadata {
     pub alerts: Alerts,
     pub retention: Option<Retention>,
     pub created_at: String,
-    pub first_event_at: Option<String>,
+    pub first_event_at: Option<DateTime<Utc>>,
     pub time_partition: Option<String>,
     pub time_partition_limit: Option<NonZeroU32>,
     pub custom_partition: Option<String>,
@@ -115,11 +115,14 @@ impl StreamInfo {
         Ok(!self.schema(stream_name)?.fields.is_empty())
     }
 
-    pub fn get_first_event(&self, stream_name: &str) -> Result<Option<String>, MetadataError> {
+    pub fn get_first_event(
+        &self,
+        stream_name: &str,
+    ) -> Result<Option<DateTime<Utc>>, MetadataError> {
         let map = self.read().expect(LOCK_EXPECT);
         map.get(stream_name)
             .ok_or(MetadataError::StreamMetaNotFound(stream_name.to_string()))
-            .map(|metadata| metadata.first_event_at.clone())
+            .map(|metadata| metadata.first_event_at)
     }
 
     pub fn get_time_partition(&self, stream_name: &str) -> Result<Option<String>, MetadataError> {
@@ -212,7 +215,7 @@ impl StreamInfo {
     pub fn set_first_event_at(
         &self,
         stream_name: &str,
-        first_event_at: &str,
+        first_event_at: DateTime<Utc>,
     ) -> Result<(), MetadataError> {
         let mut map = self.write().expect(LOCK_EXPECT);
         map.get_mut(stream_name)
@@ -474,6 +477,12 @@ pub async fn load_stream_metadata_on_server_start(
     } else {
         ObjectStoreFormat::default()
     };
+    let first_event_at = if let Some(time) = first_event_at {
+        let parsed = DateTime::parse_from_rfc3339(&time)?.to_utc();
+        Some(parsed)
+    } else {
+        None
+    };
     let schema =
         update_data_type_time_partition(storage, stream_name, schema, time_partition.as_ref())
             .await?;
@@ -558,6 +567,8 @@ pub mod error {
             ObjectStorage(#[from] ObjectStorageError),
             #[error(" Error: {0}")]
             Anyhow(#[from] anyhow::Error),
+            #[error("Error reading datetime: {0}")]
+            Chrono(#[from] chrono::ParseError),
         }
     }
 }
