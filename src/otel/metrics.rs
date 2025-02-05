@@ -345,6 +345,11 @@ fn flatten_summary(summary: &Summary) -> Vec<Map<String, Value>> {
                     .quantile_values
                     .iter()
                     .map(|quantile_value| {
+                        let value = quantile_value.value;
+                        let val = serde_json::Number::from_f64(value)
+                            .map(Value::Number)
+                            .unwrap_or_else(|| Value::Number(serde_json::Number::from(0)));
+
                         Value::Object(
                             vec![
                                 (
@@ -354,12 +359,7 @@ fn flatten_summary(summary: &Summary) -> Vec<Map<String, Value>> {
                                             .unwrap(),
                                     ),
                                 ),
-                                (
-                                    "value",
-                                    Value::Number(
-                                        serde_json::Number::from_f64(quantile_value.value).unwrap(),
-                                    ),
-                                ),
+                                ("value", val),
                             ]
                             .into_iter()
                             .map(|(k, v)| (k.to_string(), v))

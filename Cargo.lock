@@ -3313,7 +3313,7 @@ dependencies = [
 [[package]]
 name = "opentelemetry"
 version = "0.27.1"
-source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7e84c98d75ae16993a37bd5ff75a9768d652fe8f"
+source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7b113419751fc4a785107d9b6d3b18284f406076"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -3326,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "opentelemetry-proto"
 version = "0.27.0"
-source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7e84c98d75ae16993a37bd5ff75a9768d652fe8f"
+source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7b113419751fc4a785107d9b6d3b18284f406076"
 dependencies = [
  "hex",
  "opentelemetry",
@@ -3334,12 +3334,13 @@ dependencies = [
  "prost",
  "serde",
  "tonic",
+ "tracing",
 ]
 
 [[package]]
 name = "opentelemetry_sdk"
 version = "0.27.1"
-source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7e84c98d75ae16993a37bd5ff75a9768d652fe8f"
+source = "git+https://github.com/parseablehq/opentelemetry-rust?branch=fix-metrics-u64-serialization#7b113419751fc4a785107d9b6d3b18284f406076"
 dependencies = [
  "async-trait",
  "futures-channel",
@@ -3798,7 +3799,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "157c5a9d7ea5c2ed2d9fb8f495b64759f7816c7eaea54ba3978f0d63000162e3"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.96",
