@@ -28,7 +28,7 @@ use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::{
     metadata::SchemaVersion,
@@ -92,6 +92,8 @@ impl Display for LogSource {
     }
 }
 
+/// Contains the format name and a list of known field names that are associated with the said format.
+/// Stored on disk as part of `ObjectStoreFormat` in stream.json
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSourceEntry {
     pub log_source_format: LogSource,
@@ -99,23 +101,11 @@ pub struct LogSourceEntry {
 }
 
 impl LogSourceEntry {
-    pub fn new(log_source_format: &LogSource, fields: HashSet<String>) -> Self {
+    pub fn new(log_source_format: LogSource, fields: HashSet<String>) -> Self {
         LogSourceEntry {
-            log_source_format: log_source_format.clone(),
+            log_source_format,
             fields,
         }
-    }
-
-    pub fn add_log_source(&mut self, log_source_format: LogSource, fields: HashSet<String>) {
-        self.log_source_format = log_source_format;
-        self.fields = fields;
-    }
-
-    pub fn to_value(&self) -> Value {
-        json!([{
-            "log_source_format": self.log_source_format,
-            "fields": self.fields,
-        }])
     }
 }
 
