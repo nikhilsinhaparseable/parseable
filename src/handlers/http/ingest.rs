@@ -83,14 +83,14 @@ pub async fn ingest(
 
     let mut p_custom_fields = get_custom_fields_from_header(&req);
 
-    let fields = match &log_source {
+    let (_, fields) = match &log_source {
         LogSource::Custom(src) => KNOWN_SCHEMA_LIST.extract_from_inline_log(
             &mut json,
             &mut p_custom_fields,
             src,
             extract_log,
         )?,
-        _ => HashSet::new(),
+        _ => (log_source.to_string(), HashSet::new()),
     };
 
     let log_source_entry = LogSourceEntry::new(log_source.clone(), fields);

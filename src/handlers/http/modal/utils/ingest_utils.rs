@@ -28,7 +28,7 @@ use tracing::warn;
 
 use crate::{
     event::{
-        format::{json, EventFormat, LogSource},
+        format::{json, known_schema::KNOWN_SCHEMA_LIST, EventFormat, LogSource, LogSourceEntry},
         FORMAT_KEY, SOURCE_IP_KEY, USER_AGENT_KEY,
     },
     handlers::{
@@ -63,10 +63,26 @@ pub async fn flatten_and_push_logs(
             }
         }
         LogSource::OtelLogs => {
+            let mut p_custom_fields = p_custom_fields.clone();
             //custom flattening required for otel logs
             let logs: LogsData = serde_json::from_value(json)?;
-            for record in flatten_otel_logs(&logs) {
-                push_logs(stream_name, record, log_source, p_custom_fields).await?;
+            for mut record in flatten_otel_logs(&logs) {
+                let (matched_log_source, fields) = KNOWN_SCHEMA_LIST.extract_from_inline_log(
+                    &mut record,
+                    &mut p_custom_fields,
+                    &LogSource::OtelLogs.to_string(),
+                    Some("log"),
+                )?;
+
+                //add log_source and fields to stream log_source
+                let log_source_entry = LogSourceEntry {
+                    log_source_format: LogSource::from(matched_log_source.as_str()),
+                    fields,
+                };
+                PARSEABLE
+                    .add_update_log_source(stream_name, log_source_entry)
+                    .await?;
+                push_logs(stream_name, record, log_source, &p_custom_fields).await?;
             }
         }
         LogSource::OtelTraces => {

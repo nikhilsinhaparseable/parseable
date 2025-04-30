@@ -24,7 +24,9 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use tracing::error;
 
-use crate::event::FORMAT_VERIFY_KEY;
+use crate::event::{FORMAT_KEY, FORMAT_VERIFY_KEY};
+
+use super::LogSource;
 
 /// Predefined JSON with known textual logging formats
 const FORMATS_JSON: &str = include_str!("../../../resources/formats.json");
@@ -195,7 +197,25 @@ impl EventProcessor {
         p_custom_fields: &mut HashMap<String, String>,
         log_source: &str,
         extract_log: Option<&str>,
-    ) -> Result<HashSet<String>, Error> {
+    ) -> Result<(String, HashSet<String>), Error> {
+        // for log_source=`otel_logs` we need to iterate through all the schema_definitions
+        // and match the regex pattern
+        if log_source == LogSource::OtelLogs.to_string() {
+            for (log_source, schema) in self.schema_definitions.iter() {
+                if let Some(known_fields) =
+                    schema.check_or_extract(json.as_object_mut().unwrap(), extract_log)
+                {
+                    // add `P_FORMAT_VERIFY_KEY` to the object
+                    p_custom_fields.insert(FORMAT_VERIFY_KEY.to_string(), "true".to_string());
+                    // add `P_FORMAT to the object`
+                    p_custom_fields.insert(FORMAT_KEY.to_string(), log_source.to_string());
+                    return Ok((log_source.clone(), known_fields));
+                }
+            }
+            // add `P_FORMAT_VERIFY_KEY` to the object
+            p_custom_fields.insert(FORMAT_VERIFY_KEY.to_string(), "false".to_string());
+            return Ok((log_source.to_string(), HashSet::new()));
+        }
         let Some(schema) = self.schema_definitions.get(log_source) else {
             return Err(Error::Unknown(log_source.to_owned()));
         };
@@ -217,7 +237,7 @@ impl EventProcessor {
             }
             Value::Object(event) => {
                 if let Some(known_fields) = schema.check_or_extract(event, extract_log) {
-                    return Ok(known_fields);
+                    return Ok((log_source.to_string(), known_fields));
                 } else {
                     // add `P_FORMAT_VERIFY_KEY` to the object
                     p_custom_fields.insert(FORMAT_VERIFY_KEY.to_string(), "false".to_string());
@@ -226,7 +246,7 @@ impl EventProcessor {
             _ => unreachable!("We don't accept events of the form: {json}"),
         }
 
-        Ok(fields)
+        Ok((log_source.to_string(), fields))
     }
 }
 
