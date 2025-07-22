@@ -483,6 +483,14 @@ impl Server {
                                     .to(logstream::delete_stream_hot_tier)
                                     .authorize_for_resource(Action::DeleteHotTierEnabled),
                             ),
+                    )
+                    .service(
+                        // GET "/logstream/{logstream}/dependency" ==> Search logs in given log stream
+                        web::resource("/dependency").route(
+                            web::get()
+                                .to(logstream::get_stream_dependency)
+                                .authorize_for_resource(Action::GetDependency),
+                        ),
                     ),
             )
     }

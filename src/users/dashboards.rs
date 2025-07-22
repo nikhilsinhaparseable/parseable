@@ -394,6 +394,42 @@ impl Dashboards {
             .collect()
     }
 
+    ///List all dashboards
+    /// Traverse through each tile of the dashboard
+    /// and return a list of Dashboard Title, DashboardID, Tile Title and TileID that have dbname = stream_name
+    pub async fn list_tiles_for_stream(
+        &self,
+        stream_name: &str,
+    ) -> Vec<(String, Ulid, String, Ulid)> {
+        let dashboards = self.0.read().await;
+        let mut tiles = Vec::new();
+
+        for dashboard in dashboards.iter() {
+            if let Some(dashboard_tiles) = &dashboard.tiles {
+                for tile in dashboard_tiles {
+                    if let Some(other_fields) = &tile.other_fields {
+                        if let Some(dbname) = other_fields.get("dbName") {
+                            if dbname.as_str() == Some(stream_name) {
+                                tiles.push((
+                                    dashboard.title.clone(),
+                                    dashboard.dashboard_id.unwrap_or_default(),
+                                    other_fields
+                                        .get("title")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    tile.tile_id,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tiles
+    }
+
     /// Ensure the user is the owner of the dashboard
     /// This function is called when updating or deleting a dashboard
     /// check if the user is the owner of the dashboard

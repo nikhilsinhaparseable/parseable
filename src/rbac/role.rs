@@ -75,6 +75,7 @@ pub enum Action {
     CreateCorrelation,
     DeleteCorrelation,
     PutCorrelation,
+    GetDependency,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -152,6 +153,7 @@ impl RoleBuilder {
                 | Action::GetUserGroup
                 | Action::DeleteUserGroup
                 | Action::ModifyUserGroup
+                | Action::GetDependency
                 | Action::GetAnalytics => Permission::Unit(action),
                 Action::Query
                 | Action::QueryLLM
@@ -259,6 +261,7 @@ pub mod model {
                 Action::CreateDashboard,
                 Action::DeleteDashboard,
                 Action::GetUserRoles,
+                Action::GetDependency,
             ],
             resource_type: Some(ParseableResourceType::All),
         }
@@ -299,6 +302,7 @@ pub mod model {
                 Action::CreateFilter,
                 Action::DeleteFilter,
                 Action::GetUserRoles,
+                Action::GetDependency,
             ],
             resource_type: None,
         }
@@ -332,6 +336,7 @@ pub mod model {
                 Action::GetStreamInfo,
                 Action::GetUserRoles,
                 Action::GetAlert,
+                Action::GetDependency,
             ],
             resource_type: None,
         }

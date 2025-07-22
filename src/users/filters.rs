@@ -25,6 +25,7 @@ use super::TimeFilter;
 use crate::{
     migration::to_bytes,
     parseable::PARSEABLE,
+    query::resolve_stream_names,
     rbac::{Users, map::SessionKey},
     storage::object_storage::filter_path,
     utils::{get_hash, user_auth_for_datasets, user_auth_for_query},
@@ -199,6 +200,30 @@ impl Filters {
                 {
                     filters.push(f.clone())
                 }
+            }
+        }
+        filters
+    }
+
+    // function to return all filters for a given stream
+    pub async fn list_filters_for_stream(&self, stream_name: &str) -> Vec<Filter> {
+        let read = self.0.read().await;
+        let mut filters: Vec<Filter> = read
+            .iter()
+            .filter(|f| f.stream_name == stream_name)
+            .cloned()
+            .collect();
+
+        let sql_filters = read
+            .iter()
+            .filter(|f| f.query.filter_type == FilterType::SQL)
+            .cloned()
+            .collect::<Vec<_>>();
+        for filter in sql_filters {
+            let sql = filter.query.filter_query.as_deref().unwrap_or("");
+            let streams = resolve_stream_names(sql).unwrap_or_default();
+            if streams.contains(&stream_name.to_string()) {
+                filters.push(filter);
             }
         }
         filters

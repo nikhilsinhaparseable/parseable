@@ -19,6 +19,7 @@
 use self::error::StreamError;
 use super::cluster::utils::{IngestionStats, QueriedStats, StorageStats};
 use super::query::update_schema_when_distributed;
+use crate::alerts::ALERTS;
 use crate::event::format::override_data_type;
 use crate::hottier::{CURRENT_HOT_TIER_VERSION, HotTierManager, StreamHotTier};
 use crate::metadata::SchemaVersion;
@@ -29,6 +30,8 @@ use crate::rbac::role::Action;
 use crate::stats::{Stats, event_labels_date, storage_size_labels_date};
 use crate::storage::retention::Retention;
 use crate::storage::{StreamInfo, StreamType};
+use crate::users::dashboards::DASHBOARDS;
+use crate::users::filters::FILTERS;
 use crate::utils::actix::extract_session_key_from_req;
 use crate::utils::json::flatten::{
     self, convert_to_array, generic_flattening, has_more_than_max_allowed_levels,
@@ -478,6 +481,52 @@ pub async fn delete_stream_hot_tier(
         format!("hot tier deleted for stream {stream_name}"),
         StatusCode::OK,
     ))
+}
+
+pub async fn get_stream_dependency(
+    stream_name: Path<String>,
+) -> Result<impl Responder, StreamError> {
+    let stream_name = stream_name.into_inner();
+
+    // For query mode, if the stream not found in memory map,
+    //check if it exists in the storage
+    //create stream and schema from storage
+    if !PARSEABLE.check_or_load_stream(&stream_name).await {
+        return Err(StreamNotFound(stream_name).into());
+    }
+
+    // list all filters for the stream
+    let filters = FILTERS.list_filters_for_stream(&stream_name).await;
+
+    // get all alerts for the stream
+    let alerts = ALERTS
+        .list_alerts_for_stream(&stream_name)
+        .await
+        .map_err(|err| StreamError::Custom {
+            msg: err.to_string(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
+
+    // get all dashboards for the stream
+    let dashboards = DASHBOARDS.list_tiles_for_stream(&stream_name).await;
+
+    // list the filter titles, alert titles, dashboard titles and their corresponding tile titles
+    let filter_titles: Vec<String> = filters.iter().map(|f| f.filter_name.clone()).collect();
+    let alert_titles: Vec<String> = alerts.iter().map(|a| a.title.clone()).collect();
+    let dashboard_titles: Vec<String> = dashboards
+        .iter()
+        .map(|(dashboard_title, _, tile_title, _)| {
+            format!("{} - Tile: {}", dashboard_title, tile_title)
+        })
+        .collect();
+
+    //show results with filter titles and alert titles
+    let dependency = json!({
+        "filters": filter_titles,
+        "alerts": alert_titles,
+        "dashboards": dashboard_titles,
+    });
+    Ok(web::Json(dependency))
 }
 
 #[allow(unused)]

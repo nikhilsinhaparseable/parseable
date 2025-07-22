@@ -938,6 +938,21 @@ impl Alerts {
         Ok(alerts)
     }
 
+    /// Returns a list of alerts for a given stream
+    pub async fn list_alerts_for_stream(
+        &self,
+        stream: &str,
+    ) -> Result<Vec<AlertConfig>, AlertError> {
+        let mut alerts: Vec<AlertConfig> = Vec::new();
+        for (_, alert) in self.alerts.read().await.iter() {
+            if alert.stream == stream {
+                alerts.push(alert.to_owned());
+            }
+        }
+
+        Ok(alerts)
+    }
+
     /// Returns a sigle alert that the user has access to (based on query auth)
     pub async fn get_alert_by_id(&self, id: Ulid) -> Result<AlertConfig, AlertError> {
         let read_access = self.alerts.read().await;
