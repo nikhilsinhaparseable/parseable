@@ -369,6 +369,14 @@ impl QueryServer {
                         .authorize(Action::ListClusterMetrics),
                 ),
             )
+            // GET "/cluster/billing_metrics" ==> Get billing metrics of the cluster
+            .service(
+                web::resource("/billing_metrics").route(
+                    web::get()
+                        .to(cluster::get_cluster_billing_metrics)
+                        .authorize(Action::ListClusterMetrics),
+                ),
+            )
             // DELETE "/cluster/{node_domain:port}" ==> Delete a node from the cluster
             .service(
                 web::scope("/{node_url}").service(

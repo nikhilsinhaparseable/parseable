@@ -44,6 +44,7 @@ use utils::{IngestionStats, QueriedStats, StorageStats, check_liveness, to_url_s
 use crate::INTRA_CLUSTER_CLIENT;
 use crate::handlers::http::ingest::ingest_internal_stream;
 use crate::handlers::http::query::{Query, QueryError, TIME_ELAPSED_HEADER};
+use crate::metrics::billing_utils::BillingMetrics;
 use crate::metrics::prom_utils::Metrics;
 use crate::parseable::PARSEABLE;
 use crate::rbac::role::model::DefaultPrivilege;
@@ -786,6 +787,15 @@ pub async fn get_cluster_metrics() -> Result<impl Responder, PostError> {
     Ok(actix_web::HttpResponse::Ok().json(dresses))
 }
 
+pub async fn get_cluster_billing_metrics() -> Result<impl Responder, PostError> {
+    let billing_metrics = fetch_cluster_billing_metrics().await.map_err(|err| {
+        error!("Fatal: failed to fetch cluster billing metrics: {:?}", err);
+        PostError::Invalid(err.into())
+    })?;
+
+    Ok(actix_web::HttpResponse::Ok().json(billing_metrics))
+}
+
 /// get node info for a specific node type
 /// this is used to get the node info for ingestor, indexer, querier and prism
 /// it will return the metadata for all nodes of that type
@@ -1057,6 +1067,167 @@ async fn fetch_cluster_metrics() -> Result<Vec<Metrics>, PostError> {
     }
 
     Ok(all_metrics)
+}
+
+/// Fetches billing metrics for a single node
+/// This function is used to fetch billing metrics from a single node
+/// It checks if the node is live and then fetches the billing metrics
+/// If the node is not live, it returns None
+async fn fetch_node_billing_metrics<T>(node: &T) -> Result<Option<BillingMetrics>, PostError>
+where
+    T: Metadata + Send + Sync + 'static,
+{
+    // Format the metrics URL
+    let uri = Url::parse(&format!(
+        "{}{}/metrics",
+        node.domain_name(),
+        base_path_without_preceding_slash()
+    ))
+    .map_err(|err| PostError::Invalid(anyhow::anyhow!("Invalid URL in node metadata: {}", err)))?;
+
+    // Check if the node is live
+    if !check_liveness(node.domain_name()).await {
+        warn!("node {} is not live", node.domain_name());
+        return Ok(None);
+    }
+
+    // Fetch metrics
+    let res = INTRA_CLUSTER_CLIENT
+        .get(uri)
+        .header(header::AUTHORIZATION, node.token())
+        .header(header::CONTENT_TYPE, "application/json")
+        .send()
+        .await;
+
+    match res {
+        Ok(res) => {
+            let text = res.text().await.map_err(PostError::NetworkError)?;
+            let lines: Vec<Result<String, std::io::Error>> =
+                text.lines().map(|line| Ok(line.to_owned())).collect_vec();
+
+            let sample = prometheus_parse::Scrape::parse(lines.into_iter())
+                .map_err(|err| PostError::CustomError(err.to_string()))?
+                .samples;
+
+            let billing_metrics = BillingMetrics::from_prometheus_samples(sample, node)
+                .await
+                .map_err(|err| {
+                    error!("Fatal: failed to get node billing metrics: {:?}", err);
+                    PostError::Invalid(err.into())
+                })?;
+
+            Ok(Some(billing_metrics))
+        }
+        Err(_) => {
+            warn!(
+                "Failed to fetch billing metrics from node: {}\n",
+                node.domain_name()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Fetches billing metrics from multiple nodes in parallel
+async fn fetch_nodes_billing_metrics<T>(nodes: Vec<T>) -> Result<Vec<BillingMetrics>, PostError>
+where
+    T: Metadata + Send + Sync + 'static,
+{
+    let billing_metrics_futures = nodes
+        .iter()
+        .map(|node| fetch_node_billing_metrics(node))
+        .collect::<Vec<_>>();
+
+    let billing_metrics_results = future::try_join_all(billing_metrics_futures).await?;
+
+    let mut billing_metrics = Vec::new();
+    for metrics in billing_metrics_results.into_iter().flatten() {
+        billing_metrics.push(metrics);
+    }
+
+    Ok(billing_metrics)
+}
+
+/// Main function to fetch cluster billing metrics
+/// fetches node info for all nodes
+/// fetches billing metrics for all nodes
+/// sums all billing metrics into a single aggregated result
+async fn fetch_cluster_billing_metrics() -> Result<BillingMetrics, PostError> {
+    // Get ingestor and indexer metadata concurrently
+    let (prism_result, querier_result, ingestor_result, indexer_result) = future::join4(
+        get_node_info(NodeType::Prism),
+        get_node_info(NodeType::Querier),
+        get_node_info(NodeType::Ingestor),
+        get_node_info(NodeType::Indexer),
+    )
+    .await;
+
+    // Handle prism metadata result
+    let prism_metadata: Vec<NodeMetadata> = prism_result.map_err(|err| {
+        error!("Fatal: failed to get prism info: {:?}", err);
+        PostError::Invalid(err)
+    })?;
+
+    // Handle querier metadata result
+    let querier_metadata: Vec<NodeMetadata> = querier_result.map_err(|err| {
+        error!("Fatal: failed to get querier info: {:?}", err);
+        PostError::Invalid(err)
+    })?;
+    // Handle ingestor metadata result
+    let ingestor_metadata: Vec<NodeMetadata> = ingestor_result.map_err(|err| {
+        error!("Fatal: failed to get ingestor info: {:?}", err);
+        PostError::Invalid(err)
+    })?;
+    // Handle indexer metadata result
+    let indexer_metadata: Vec<NodeMetadata> = indexer_result.map_err(|err| {
+        error!("Fatal: failed to get indexer info: {:?}", err);
+        PostError::Invalid(err)
+    })?;
+    // Fetch billing metrics from ingestors and indexers concurrently
+    let (
+        prism_billing_metrics,
+        querier_billing_metrics,
+        ingestor_billing_metrics,
+        indexer_billing_metrics,
+    ) = future::join4(
+        fetch_nodes_billing_metrics(prism_metadata),
+        fetch_nodes_billing_metrics(querier_metadata),
+        fetch_nodes_billing_metrics(ingestor_metadata),
+        fetch_nodes_billing_metrics(indexer_metadata),
+    )
+    .await;
+
+    // Combine all billing metrics
+    let mut all_billing_metrics = Vec::new();
+
+    // Add prism billing metrics
+    match prism_billing_metrics {
+        Ok(metrics) => all_billing_metrics.extend(metrics),
+        Err(err) => return Err(err),
+    }
+
+    // Add querier billing metrics
+    match querier_billing_metrics {
+        Ok(metrics) => all_billing_metrics.extend(metrics),
+        Err(err) => return Err(err),
+    }
+
+    // Add ingestor billing metrics
+    match ingestor_billing_metrics {
+        Ok(metrics) => all_billing_metrics.extend(metrics),
+        Err(err) => return Err(err),
+    }
+
+    // Add indexer billing metrics
+    match indexer_billing_metrics {
+        Ok(metrics) => all_billing_metrics.extend(metrics),
+        Err(err) => return Err(err),
+    }
+
+    // Sum all billing metrics from all nodes
+    let aggregated_billing_metrics = BillingMetrics::sum_metrics(all_billing_metrics);
+
+    Ok(aggregated_billing_metrics)
 }
 
 pub fn init_cluster_metrics_schedular() -> Result<(), PostError> {

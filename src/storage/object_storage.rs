@@ -55,7 +55,10 @@ use crate::handlers::http::modal::ingest_server::INGESTOR_META;
 use crate::handlers::http::users::CORRELATION_DIR;
 use crate::handlers::http::users::{DASHBOARDS_DIR, FILTER_DIR, USERS_ROOT_DIR};
 use crate::metrics::storage::StorageMetrics;
-use crate::metrics::{EVENTS_STORAGE_SIZE_DATE, LIFETIME_EVENTS_STORAGE_SIZE, STORAGE_SIZE};
+use crate::metrics::{
+    EVENTS_STORAGE_SIZE_DATE, LIFETIME_EVENTS_STORAGE_SIZE, STORAGE_SIZE,
+    increment_parquets_stored_by_date, increment_parquets_stored_size_by_date,
+};
 use crate::option::Mode;
 use crate::parseable::{LogStream, PARSEABLE, Stream};
 use crate::stats::FullStats;
@@ -121,6 +124,13 @@ async fn upload_single_parquet_file(
 
     // Update storage metrics
     update_storage_metrics(&path, &stream_name, filename)?;
+
+    // Track billing metrics for parquet storage
+    let mut file_date_part = filename.split('.').collect::<Vec<&str>>()[0];
+    file_date_part = file_date_part.split('=').collect::<Vec<&str>>()[1];
+    let file_size = path.metadata().map_or(0, |meta| meta.len());
+    increment_parquets_stored_by_date(1, file_date_part);
+    increment_parquets_stored_size_by_date(file_size, file_date_part);
 
     // Create manifest entry
     let absolute_path = store

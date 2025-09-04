@@ -60,7 +60,11 @@ use crate::{
     },
     event::DEFAULT_TIMESTAMP_KEY,
     hottier::HotTierManager,
-    metrics::QUERY_CACHE_HIT,
+    metrics::{
+        QUERY_CACHE_HIT, increment_bytes_scanned_in_query_by_date,
+        increment_files_scanned_in_object_store_calls_by_date,
+        increment_files_scanned_in_query_by_date, increment_object_store_calls_by_date,
+    },
     option::Mode,
     parseable::{PARSEABLE, STREAM_EXISTS},
     storage::{ObjectStorage, ObjectStoreFormat, STREAM_ROOT_DIRECTORY},
@@ -332,6 +336,9 @@ impl StandardTableProvider {
         let mut partitioned_files = Vec::from_iter((0..target_partition).map(|_| Vec::new()));
         let mut column_statistics = HashMap::<String, Option<TypedStatistics>>::new();
         let mut count = 0;
+        let mut total_file_size = 0u64;
+        let mut file_count = 0u64;
+
         for (index, file) in manifest_files
             .into_iter()
             .enumerate()
@@ -342,8 +349,13 @@ impl StandardTableProvider {
                 mut file_path,
                 num_rows,
                 columns,
+                file_size,
                 ..
             } = file;
+
+            // Track billing metrics for files scanned in query
+            file_count += 1;
+            total_file_size += file_size;
 
             // object_store::path::Path doesn't automatically deal with Windows path separators
             // to do that, we are using from_absolute_path() which takes into consideration the underlying filesystem
@@ -400,6 +412,11 @@ impl StandardTableProvider {
             total_byte_size: Precision::Absent,
             column_statistics: statistics,
         };
+
+        // Track billing metrics for query scan
+        let current_date = chrono::Utc::now().date_naive().to_string();
+        increment_files_scanned_in_query_by_date(file_count, &current_date);
+        increment_bytes_scanned_in_query_by_date(total_file_size, &current_date);
 
         (partitioned_files, statistics)
     }
@@ -852,6 +869,12 @@ pub async fn collect_manifest_files(
     storage: Arc<dyn ObjectStore>,
     manifest_urls: Vec<String>,
 ) -> Result<Vec<Manifest>, object_store::Error> {
+    // Track billing metrics for object store calls
+    let current_date = chrono::Utc::now().date_naive().to_string();
+    for _ in 0..manifest_urls.len() {
+        increment_object_store_calls_by_date(&current_date);
+    }
+
     let tasks = manifest_urls.into_iter().map(|path| {
         let path = Path::parse(path).unwrap();
         let storage = Arc::clone(&storage);
@@ -862,6 +885,13 @@ pub async fn collect_manifest_files(
         .and_then(|res| res.bytes())
         .collect::<Vec<object_store::Result<Bytes>>>()
         .await;
+
+    // Track files scanned in object store calls
+    for result in &resp {
+        if result.is_ok() {
+            increment_files_scanned_in_object_store_calls_by_date(1, &current_date);
+        }
+    }
 
     Ok(resp
         .into_iter()
