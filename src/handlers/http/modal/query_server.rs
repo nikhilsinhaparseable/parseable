@@ -27,6 +27,7 @@ use crate::handlers::http::{MAX_EVENT_PAYLOAD_SIZE, logstream};
 use crate::handlers::http::{base_path, prism_base_path, resource_check};
 use crate::handlers::http::{rbac, role};
 use crate::hottier::HotTierManager;
+use crate::option::StorageFormat;
 use crate::rbac::role::Action;
 use crate::sync::sync_start;
 use crate::{analytics, migration, storage, sync};
@@ -88,6 +89,12 @@ impl ParseableServer for QueryServer {
     }
 
     async fn load_metadata(&self) -> anyhow::Result<Option<Bytes>> {
+        // Enterprise feature check: block if P_STORAGE_FORMAT is set to anything but default
+        if !matches!(PARSEABLE.options.storage_format, StorageFormat::Parquet) {
+            return Err(anyhow::anyhow!(
+                "Iceberg is an enterprise feature and cannot be set in  OSS deployments.",
+            ));
+        }
         // parseable can't use local storage for persistence when running a distributed setup
         if PARSEABLE.storage.name() == "drive" {
             return Err(anyhow::anyhow!(

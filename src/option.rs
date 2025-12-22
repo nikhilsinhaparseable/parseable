@@ -86,6 +86,14 @@ impl From<Compression> for parquet::basic::Compression {
     }
 }
 
+#[derive(Debug, Default, Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageFormat {
+    #[default]
+    Parquet,
+    Iceberg,
+}
+
 pub mod validation {
     use std::{
         env, io,
@@ -93,7 +101,7 @@ pub mod validation {
         path::{Path, PathBuf},
     };
 
-    use crate::cli::DATASET_FIELD_COUNT_LIMIT;
+    use crate::{cli::DATASET_FIELD_COUNT_LIMIT, option::StorageFormat};
     use path_clean::PathClean;
 
     use super::{Compression, Mode};
@@ -207,6 +215,17 @@ pub mod validation {
             }
         } else {
             Err("Invalid value for P_DATASET_FIELD_COUNT_LIMIT. It should be given as integer value".to_string())
+        }
+    }
+
+    pub fn validate_storage_format(s: &str) -> Result<StorageFormat, String> {
+        match s.to_lowercase().as_str() {
+            "parquet" => Ok(StorageFormat::Parquet),
+            "iceberg" => Ok(StorageFormat::Iceberg),
+            _ => Err(
+                "Invalid STORAGE_FORMAT provided. It should be either 'parquet' or 'iceberg'."
+                    .to_string(),
+            ),
         }
     }
 }

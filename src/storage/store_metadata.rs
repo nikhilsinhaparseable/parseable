@@ -29,7 +29,7 @@ use std::io;
 
 use crate::{
     metastore::metastore_traits::MetastoreObject,
-    option::Mode,
+    option::{Mode, StorageFormat},
     parseable::{JOIN_COMMUNITY, PARSEABLE},
     rbac::{
         role::model::DefaultPrivilege,
@@ -68,6 +68,9 @@ pub struct StorageMetadata {
     pub roles: HashMap<String, Vec<DefaultPrivilege>>,
     #[serde(default)]
     pub default_role: Option<String>,
+    /// Storage format: "parquet" or "iceberg". Optional for backward compatibility.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_format: Option<StorageFormat>,
 }
 
 impl Default for StorageMetadata {
@@ -84,6 +87,7 @@ impl Default for StorageMetadata {
             streams: Vec::new(),
             roles: HashMap::default(),
             default_role: None,
+            storage_format: None,
         }
     }
 }

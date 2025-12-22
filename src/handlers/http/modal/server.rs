@@ -35,6 +35,7 @@ use crate::handlers::http::users::filters;
 use crate::hottier::HotTierManager;
 use crate::metrics;
 use crate::migration;
+use crate::option::StorageFormat;
 use crate::storage;
 use crate::sync;
 use crate::sync::sync_start;
@@ -114,6 +115,12 @@ impl ParseableServer for Server {
     }
 
     async fn load_metadata(&self) -> anyhow::Result<Option<Bytes>> {
+        // Enterprise feature check: block if P_STORAGE_FORMAT is set to anything but default
+        if !matches!(PARSEABLE.options.storage_format, StorageFormat::Parquet) {
+            return Err(anyhow::Error::msg(
+                "Iceberg is an enterprise feature and cannot be set in  OSS deployments.",
+            ));
+        }
         //TODO: removed file migration
         //deprecated support for deployments < v1.0.0
         let mut parseable_json = PARSEABLE.validate_storage().await?;

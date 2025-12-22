@@ -26,7 +26,7 @@ use crate::connectors::kafka::config::KafkaConfig;
 
 use crate::{
     oidc::{self, OpenidConfig},
-    option::{Compression, Mode, validation},
+    option::{Compression, Mode, StorageFormat, validation},
     storage::{AzureBlobConfig, FSConfig, GcsConfig, S3Config},
 };
 
@@ -137,6 +137,14 @@ pub struct Options {
 
     #[arg(long, env = "P_PASSWORD", help = "Admin password to be set for this Parseable server", default_value = DEFAULT_PASSWORD)]
     pub password: String,
+
+    /// Storage format: parquet or iceberg
+    #[arg(
+        long, env = "P_STORAGE_FORMAT", 
+        default_value = "parquet",
+        value_parser = validation::validate_storage_format,
+        help = "Storage format for log data (parquet or iceberg)")]
+    pub storage_format: StorageFormat,
 
     // Server configuration
     #[arg(

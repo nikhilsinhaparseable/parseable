@@ -31,6 +31,7 @@ use tokio::sync::OnceCell;
 use tokio::sync::oneshot;
 
 use crate::handlers::http::modal::NodeType;
+use crate::option::StorageFormat;
 use crate::sync::sync_start;
 use crate::{
     Server, analytics,
@@ -86,6 +87,12 @@ impl ParseableServer for IngestServer {
     }
 
     async fn load_metadata(&self) -> anyhow::Result<Option<Bytes>> {
+        // Enterprise feature check: block if P_STORAGE_FORMAT is set to anything but default
+        if !matches!(PARSEABLE.options.storage_format, StorageFormat::Parquet) {
+            return Err(anyhow::Error::msg(
+                "Iceberg is an enterprise feature and cannot be set in OSS deployments.",
+            ));
+        }
         // parseable can't use local storage for persistence when running a distributed setup
         if PARSEABLE.storage.name() == "drive" {
             return Err(anyhow::Error::msg(
