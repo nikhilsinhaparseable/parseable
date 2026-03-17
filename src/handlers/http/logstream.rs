@@ -56,6 +56,13 @@ pub async fn delete(
     let stream_name = logstream.into_inner();
     // Error out if stream doesn't exist in memory, or in the case of query node, in storage as well
     let tenant_id = get_tenant_id_from_request(&req);
+    // Reject delete on shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(StreamError::Custom {
+            msg: format!("Cannot delete stream '{stream_name}': it is shared read-only from another tenant"),
+            status: StatusCode::FORBIDDEN,
+        });
+    }
     if !PARSEABLE
         .check_or_load_stream(&stream_name, &tenant_id)
         .await
@@ -99,10 +106,17 @@ pub async fn list(req: HttpRequest) -> Result<impl Responder, StreamError> {
 
     let tenant_id = get_tenant_id_from_request(&req);
     // list all streams from storage
-    let res = PARSEABLE
+    let mut stream_names: std::collections::HashSet<String> = PARSEABLE
         .metastore
         .list_streams(&tenant_id)
-        .await?
+        .await?;
+
+    // Append shared streams from other tenants (in-memory)
+    for (_, stream_name, _) in PARSEABLE.streams.list_shared_streams(&tenant_id) {
+        stream_names.insert(stream_name);
+    }
+
+    let res = stream_names
         .into_iter()
         .filter(|logstream| {
             Users.authorize(key.clone(), Action::ListStream, Some(logstream), None)
@@ -243,6 +257,13 @@ pub async fn put_retention(
 ) -> Result<impl Responder, StreamError> {
     let stream_name = stream_name.into_inner();
     let tenant_id = get_tenant_id_from_request(&req);
+    // Reject retention changes on shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(StreamError::Custom {
+            msg: format!("Cannot modify retention for stream '{stream_name}': it is shared read-only from another tenant"),
+            status: StatusCode::FORBIDDEN,
+        });
+    }
     // For query mode, if the stream not found in memory map,
     //check if it exists in the storage
     //create stream and schema from storage
@@ -420,6 +441,13 @@ pub async fn put_stream_hot_tier(
 ) -> Result<impl Responder, StreamError> {
     let stream_name = logstream.into_inner();
     let tenant_id = get_tenant_id_from_request(&req);
+    // Reject hot tier changes on shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(StreamError::Custom {
+            msg: format!("Cannot modify hot tier for stream '{stream_name}': it is shared read-only from another tenant"),
+            status: StatusCode::FORBIDDEN,
+        });
+    }
     // For query mode, if the stream not found in memory map,
     //check if it exists in the storage
     //create stream and schema from storage
@@ -508,6 +536,13 @@ pub async fn delete_stream_hot_tier(
 ) -> Result<impl Responder, StreamError> {
     let stream_name = logstream.into_inner();
     let tenant_id = get_tenant_id_from_request(&req);
+    // Reject hot tier deletion on shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(StreamError::Custom {
+            msg: format!("Cannot delete hot tier for stream '{stream_name}': it is shared read-only from another tenant"),
+            status: StatusCode::FORBIDDEN,
+        });
+    }
     // For query mode, if the stream not found in memory map,
     //check if it exists in the storage
     //create stream and schema from storage

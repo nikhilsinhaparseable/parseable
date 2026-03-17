@@ -94,6 +94,10 @@ pub struct LogStreamMetadata {
     pub log_source: Vec<LogSourceEntry>,
     pub telemetry_type: TelemetryType,
     pub dataset_tag: Option<DatasetTag>,
+    /// When true, this stream is visible read-only to all tenants.
+    pub shared: bool,
+    /// The tenant that owns this stream (set only for shared streams resolved from another tenant).
+    pub owner_tenant_id: Option<String>,
 }
 
 impl LogStreamMetadata {

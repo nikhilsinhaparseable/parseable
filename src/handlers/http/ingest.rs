@@ -69,6 +69,11 @@ pub async fn ingest(
         return Err(PostError::InternalStream(stream_name));
     }
 
+    // Reject writes to shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(PostError::SharedStreamReadOnly(stream_name));
+    }
+
     let log_source = req
         .headers()
         .get(LOG_SOURCE_KEY)
@@ -231,6 +236,13 @@ pub async fn setup_otel_stream(
     );
 
     let tenant_id = get_tenant_id_from_request(req);
+    // Reject writes to shared streams from other tenants
+    if PARSEABLE
+        .get_shared_stream(&stream_name, &tenant_id)
+        .is_some()
+    {
+        return Err(PostError::SharedStreamReadOnly(stream_name));
+    }
     PARSEABLE
         .create_stream_if_not_exists(
             &stream_name,
@@ -443,6 +455,10 @@ pub async fn post_event(
     if internal_stream_names.contains(&stream_name) {
         return Err(PostError::InternalStream(stream_name));
     }
+    // Reject writes to shared streams from other tenants
+    if PARSEABLE.get_shared_stream(&stream_name, &tenant_id).is_some() {
+        return Err(PostError::SharedStreamReadOnly(stream_name));
+    }
     if !PARSEABLE.streams.contains(&stream_name, &tenant_id) {
         // For distributed deployments, if the stream not found in memory map,
         // check if it exists in the storage
@@ -579,6 +595,8 @@ pub enum PostError {
     IncorrectLogSource(LogSource, String),
     #[error("Ingestion is not allowed in Query mode")]
     IngestionNotAllowed,
+    #[error("Stream {0} is shared read-only from another tenant and cannot be ingested into")]
+    SharedStreamReadOnly(String),
     #[error("Missing field for time partition in json: {0}")]
     MissingTimePartition(String),
     #[error("{0}")]
@@ -617,6 +635,8 @@ impl actix_web::ResponseError for PostError {
             | MissingQueryParameter
             | CreateStream(CreateStreamError::StreamNameValidation(_))
             | OtelNotSupported(_) => StatusCode::BAD_REQUEST,
+
+            SharedStreamReadOnly(_) => StatusCode::FORBIDDEN,
 
             Event(_)
             | CreateStream(_)

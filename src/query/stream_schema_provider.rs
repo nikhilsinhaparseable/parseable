@@ -83,13 +83,25 @@ impl SchemaProvider for GlobalSchemaProvider {
 
     async fn table(&self, name: &str) -> DataFusionResult<Option<Arc<dyn TableProvider>>> {
         if self.table_exist(name) {
+            // If the stream is shared from another tenant, resolve via the owner tenant
+            let (schema, tenant_for_query) =
+                if let Some((stream_ref, owner_tenant)) =
+                    PARSEABLE.get_shared_stream(name, &self.tenant_id)
+                {
+                    (stream_ref.get_schema(), Some(owner_tenant))
+                } else {
+                    (
+                        PARSEABLE
+                            .get_stream(name, &self.tenant_id)
+                            .expect(STREAM_EXISTS)
+                            .get_schema(),
+                        self.tenant_id.clone(),
+                    )
+                };
             Ok(Some(Arc::new(StandardTableProvider {
-                schema: PARSEABLE
-                    .get_stream(name, &self.tenant_id)
-                    .expect(STREAM_EXISTS)
-                    .get_schema(),
+                schema,
                 stream: name.to_owned(),
-                tenant_id: self.tenant_id.clone(),
+                tenant_id: tenant_for_query,
             })))
         } else {
             Ok(None)

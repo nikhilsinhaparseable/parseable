@@ -42,6 +42,7 @@ use tokio::try_join;
 use tracing::error;
 
 pub const DEFAULT_TENANT: &str = "DEFAULT_TENANT";
+pub const DEMO_TENANT: &str = "__demo__";
 
 #[cfg(feature = "kafka")]
 use crate::connectors::kafka::config::KafkaConfig;
@@ -209,20 +210,58 @@ impl Parseable {
         }
     }
     /// Try to get the handle of a stream in staging, if it doesn't exist return `None`.
+    /// Falls back to shared streams from other tenants if the stream is not found in the
+    /// requesting tenant's own streams.
     pub fn get_stream(
         &self,
         stream_name: &str,
         tenant_id: &Option<String>,
     ) -> Result<StreamRef, StreamNotFound> {
-        let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-        self.streams
-            .read()
-            .unwrap()
-            .get(tenant_id)
-            .ok_or_else(|| StreamNotFound(format!("{stream_name} with tenant {tenant_id}")))
-            .map(|v| v.get(stream_name))?
-            .ok_or_else(|| StreamNotFound(stream_name.to_owned()))
-            .cloned()
+        let tid = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        let guard = self.streams.read().unwrap();
+
+        // First, try the tenant's own streams
+        if let Some(tenant_streams) = guard.get(tid) {
+            if let Some(stream) = tenant_streams.get(stream_name) {
+                return Ok(stream.clone());
+            }
+        }
+
+        // Fallback: check shared streams from other tenants
+        for (other_tenant, tenant_streams) in guard.iter() {
+            if other_tenant == tid {
+                continue;
+            }
+            if let Some(stream) = tenant_streams.get(stream_name) {
+                if stream.metadata.read().unwrap().shared {
+                    return Ok(stream.clone());
+                }
+            }
+        }
+
+        Err(StreamNotFound(stream_name.to_owned()))
+    }
+
+    /// Resolve a shared stream: returns (stream_ref, owner_tenant_id) if the stream is shared
+    /// from another tenant.
+    pub fn get_shared_stream(
+        &self,
+        stream_name: &str,
+        requesting_tenant: &Option<String>,
+    ) -> Option<(StreamRef, String)> {
+        let tid = requesting_tenant.as_deref().unwrap_or(DEFAULT_TENANT);
+        let guard = self.streams.read().unwrap();
+        for (owner_tenant, tenant_streams) in guard.iter() {
+            if owner_tenant == tid {
+                continue;
+            }
+            if let Some(stream) = tenant_streams.get(stream_name) {
+                if stream.metadata.read().unwrap().shared {
+                    return Some((stream.clone(), owner_tenant.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// Get the handle to a stream in staging, create one if it doesn't exist
@@ -434,6 +473,7 @@ impl Parseable {
         // Set hot tier fields from the stored metadata
         metadata.hot_tier_enabled = hot_tier_enabled;
         metadata.hot_tier.clone_from(&hot_tier);
+        metadata.shared = stream_metadata.shared;
 
         let ingestor_id = INGESTOR_META
             .get()

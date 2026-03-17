@@ -1198,11 +1198,24 @@ impl Streams {
 
     pub fn contains(&self, stream_name: &str, tenant_id: &Option<String>) -> bool {
         let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-        if let Some(tenant) = self.read().expect(LOCK_EXPECT).get(tenant_id) {
-            tenant.contains_key(stream_name)
-        } else {
-            false
+        let guard = self.read().expect(LOCK_EXPECT);
+        if let Some(tenant) = guard.get(tenant_id) {
+            if tenant.contains_key(stream_name) {
+                return true;
+            }
         }
+        // Check shared streams from other tenants
+        for (other_tenant, tenant_streams) in guard.iter() {
+            if other_tenant == tenant_id {
+                continue;
+            }
+            if let Some(stream) = tenant_streams.get(stream_name) {
+                if stream.metadata.read().expect(LOCK_EXPECT).shared {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Returns the number of logstreams that parseable is aware of
@@ -1219,25 +1232,58 @@ impl Streams {
         self.len() == 0
     }
 
-    /// Listing of logstream names for a given tenant that parseable is aware of
+    /// Listing of logstream names for a given tenant that parseable is aware of.
+    /// Includes both the tenant's own streams and shared streams from other tenants.
     pub fn list(&self, tenant_id: &Option<String>) -> Vec<LogStream> {
         let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
 
         let guard = self.read().expect(LOCK_EXPECT);
-        if let Some(tenant_streams) = guard.get(tenant_id) {
+        let mut streams: Vec<LogStream> = if let Some(tenant_streams) = guard.get(tenant_id) {
             tenant_streams.keys().map(String::clone).collect()
         } else {
             vec![]
+        };
+
+        // Append shared streams from other tenants
+        for (other_tenant, tenant_streams) in guard.iter() {
+            if other_tenant == tenant_id {
+                continue;
+            }
+            for (stream_name, stream_ref) in tenant_streams {
+                if stream_ref.metadata.read().expect(LOCK_EXPECT).shared
+                    && !streams.contains(stream_name)
+                {
+                    streams.push(stream_name.clone());
+                }
+            }
         }
 
-        // self.read()
-        //     .expect(LOCK_EXPECT)
-        //     .get(&tenant_id)
-        //     .and_then(|v|v.keys())
-        //     .map(f)
-        //     .keys()
-        //     .map(String::clone)
-        //     .collect()
+        streams
+    }
+
+    /// Returns shared streams from other tenants as (owner_tenant_id, stream_name, StreamRef).
+    pub fn list_shared_streams(
+        &self,
+        requesting_tenant: &Option<String>,
+    ) -> Vec<(String, String, StreamRef)> {
+        let tid = requesting_tenant.as_deref().unwrap_or(DEFAULT_TENANT);
+        let guard = self.read().expect(LOCK_EXPECT);
+        let mut result = Vec::new();
+        for (owner_tenant, tenant_streams) in guard.iter() {
+            if owner_tenant == tid {
+                continue;
+            }
+            for (stream_name, stream_ref) in tenant_streams {
+                if stream_ref.metadata.read().expect(LOCK_EXPECT).shared {
+                    result.push((
+                        owner_tenant.clone(),
+                        stream_name.clone(),
+                        stream_ref.clone(),
+                    ));
+                }
+            }
+        }
+        result
     }
 
     pub fn list_internal_streams(&self, tenant_id: &Option<String>) -> Vec<String> {
