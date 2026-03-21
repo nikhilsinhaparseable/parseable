@@ -71,6 +71,8 @@ pub struct StorageMetadata {
     pub suspended_services: Option<HashSet<Service>>,
     pub global_query_auth: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_ingestion_auth: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub customer_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_date: Option<String>,
@@ -101,6 +103,7 @@ impl Default for StorageMetadata {
             default_role: None,
             suspended_services: None,
             global_query_auth: None,
+            global_ingestion_auth: None,
             customer_name: None,
             start_date: None,
             end_date: None,
