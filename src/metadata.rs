@@ -94,6 +94,8 @@ pub struct LogStreamMetadata {
     pub log_source: Vec<LogSourceEntry>,
     pub telemetry_type: TelemetryType,
     pub dataset_tag: Option<DatasetTag>,
+    /// When true this stream is a shared demo stream (read-only for non-demo tenants).
+    pub shared: bool,
 }
 
 impl LogStreamMetadata {

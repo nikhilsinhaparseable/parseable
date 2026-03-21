@@ -80,6 +80,9 @@ pub struct StorageMetadata {
     pub plan: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// Whether this tenant has subscribed to the shared demo streams.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub demo_subscribed: bool,
 }
 
 impl Default for StorageMetadata {
@@ -103,6 +106,7 @@ impl Default for StorageMetadata {
             end_date: None,
             plan: None,
             owner: None,
+            demo_subscribed: false,
         }
     }
 }

@@ -462,10 +462,13 @@ pub async fn create_streams_for_distributed(
     }
     let mut join_set = JoinSet::new();
     for stream_name in streams {
-        let id = tenant_id.to_owned();
+        // For shared demo streams the data lives under the demo tenant;
+        // redirect so `create_stream_and_schema_from_storage` looks in the
+        // correct storage path instead of logging a spurious warning.
+        let effective_id = PARSEABLE.effective_tenant_for_stream(&stream_name, tenant_id);
         join_set.spawn(async move {
             let result = PARSEABLE
-                .create_stream_and_schema_from_storage(&stream_name, &id)
+                .create_stream_and_schema_from_storage(&stream_name, &effective_id)
                 .await;
 
             if let Err(e) = &result {

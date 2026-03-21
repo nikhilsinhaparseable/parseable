@@ -133,6 +133,9 @@ pub struct ObjectStoreFormat {
     pub telemetry_type: TelemetryType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_tag: Option<DatasetTag>,
+    /// When true this stream is shared read-only with subscribed tenants.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 impl MetastoreObject for ObjectStoreFormat {
@@ -175,6 +178,9 @@ pub struct StreamInfo {
     pub hot_tier_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_tag: Option<DatasetTag>,
+    /// Reflects the owning stream's shared flag for display purposes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
 }
 
 impl StreamInfo {
@@ -198,6 +204,7 @@ impl StreamInfo {
             telemetry_type: metadata.telemetry_type,
             hot_tier_enabled: metadata.hot_tier_enabled,
             dataset_tag: metadata.dataset_tag,
+            shared: metadata.shared,
         }
     }
 }
@@ -280,6 +287,7 @@ impl Default for ObjectStoreFormat {
             log_source: vec![LogSourceEntry::default()],
             telemetry_type: TelemetryType::Logs,
             dataset_tag: None,
+            shared: false,
         }
     }
 }

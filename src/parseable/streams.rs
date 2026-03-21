@@ -1219,16 +1219,34 @@ impl Streams {
         self.len() == 0
     }
 
-    /// Listing of logstream names for a given tenant that parseable is aware of
+    /// Listing of logstream names for a given tenant that parseable is aware of.
+    /// For tenants subscribed to the demo, shared demo streams are appended.
     pub fn list(&self, tenant_id: &Option<String>) -> Vec<LogStream> {
-        let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        use super::{DEMO_TENANT, is_subscribed_to_demo};
 
+        let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
         let guard = self.read().expect(LOCK_EXPECT);
-        if let Some(tenant_streams) = guard.get(tenant_id) {
+
+        let mut streams: Vec<LogStream> = if let Some(tenant_streams) = guard.get(effective_tenant)
+        {
             tenant_streams.keys().map(String::clone).collect()
         } else {
             vec![]
+        };
+
+        // Append shared demo streams for subscribed non-demo tenants.
+        if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
+            if let Some(demo_streams) = guard.get(DEMO_TENANT) {
+                for (name, stream) in demo_streams {
+                    if stream.metadata.read().expect(LOCK_EXPECT).shared && !streams.contains(name)
+                    {
+                        streams.push(name.clone());
+                    }
+                }
+            }
         }
+
+        streams
 
         // self.read()
         //     .expect(LOCK_EXPECT)

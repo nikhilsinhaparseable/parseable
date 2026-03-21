@@ -270,19 +270,26 @@ impl PrismDatasetRequest {
         key: SessionKey,
         tenant_id: &Option<String>,
     ) -> Result<Option<PrismDatasetResponse>, PrismLogstreamError> {
+        // For shared demo streams, redirect all storage/metadata lookups to
+        // the demo tenant so that the correct storage path is used.
+        let effective_tid = PARSEABLE.effective_tenant_for_stream(&stream, tenant_id);
+
         // Skip unauthorized streams
         if !self.is_authorized(&stream, &key) {
             return Ok(None);
         }
 
         // Skip streams that don't exist
-        if !PARSEABLE.check_or_load_stream(&stream, tenant_id).await {
+        if !PARSEABLE
+            .check_or_load_stream(&stream, &effective_tid)
+            .await
+        {
             return Ok(None);
         }
 
         // exclude internal streams
         let is_internal = PARSEABLE
-            .get_stream(&stream, tenant_id)
+            .get_stream(&stream, &effective_tid)
             .is_ok_and(|stream| {
                 stream
                     .get_stream_type()
@@ -293,9 +300,10 @@ impl PrismDatasetRequest {
         }
 
         // Process stream data
-        match get_prism_logstream_info(&stream, tenant_id).await {
+        match get_prism_logstream_info(&stream, &effective_tid).await {
             Ok(info) => Ok(Some(
-                self.build_dataset_response(stream, info, tenant_id).await?,
+                self.build_dataset_response(stream, info, &effective_tid)
+                    .await?,
             )),
             Err(err) => Err(err),
         }

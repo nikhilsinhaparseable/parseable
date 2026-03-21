@@ -83,13 +83,16 @@ impl SchemaProvider for GlobalSchemaProvider {
 
     async fn table(&self, name: &str) -> DataFusionResult<Option<Arc<dyn TableProvider>>> {
         if self.table_exist(name) {
+            // For shared demo streams, redirect all storage operations to the
+            // demo tenant so that `scan()` reads from the correct storage path.
+            let effective_tid = PARSEABLE.effective_tenant_for_stream(name, &self.tenant_id);
             Ok(Some(Arc::new(StandardTableProvider {
                 schema: PARSEABLE
                     .get_stream(name, &self.tenant_id)
                     .expect(STREAM_EXISTS)
                     .get_schema(),
                 stream: name.to_owned(),
-                tenant_id: self.tenant_id.clone(),
+                tenant_id: effective_tid,
             })))
         } else {
             Ok(None)

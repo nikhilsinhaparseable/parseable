@@ -27,7 +27,7 @@ use crate::{
     event::format::{LogSource, LogSourceEntry},
     handlers::{DatasetTag, TelemetryType, http::logstream::error::StreamError},
     metastore::MetastoreError,
-    parseable::{DEFAULT_TENANT, PARSEABLE},
+    parseable::{DEFAULT_TENANT, PARSEABLE, is_subscribed_to_demo},
     rbac::{
         Users,
         map::{SessionKey, users},
@@ -106,8 +106,20 @@ pub async fn generate_home_response(
     include_internal: bool,
 ) -> Result<HomeResponse, PrismHomeError> {
     let tenant_id = &get_tenant_id_from_key(key);
+    let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+
     // Execute these operations concurrently
-    let all_streams = PARSEABLE.metastore.list_streams(tenant_id).await?;
+    let mut all_streams = PARSEABLE.metastore.list_streams(tenant_id).await?;
+
+    // For tenants subscribed to demo, append shared demo streams that are not
+    // yet in the tenant's own stream list.
+    if is_subscribed_to_demo(effective_tenant) {
+        for demo_name in PARSEABLE.list_demo_stream_names() {
+            if !all_streams.contains(&demo_name) {
+                all_streams.insert(demo_name);
+            }
+        }
+    }
 
     let stream_titles: Vec<String> = all_streams
         .iter()
@@ -119,10 +131,13 @@ pub async fn generate_home_response(
         .sorted()
         .collect_vec();
 
-    // Process stream metadata concurrently
-    let stream_metadata_futures = stream_titles
-        .iter()
-        .map(|stream| get_stream_metadata(stream.clone(), tenant_id));
+    // Process stream metadata concurrently — use the demo tenant's ID for
+    // shared demo streams so that the metadata is fetched from the correct
+    // storage path.
+    let stream_metadata_futures = stream_titles.iter().map(|stream| {
+        let eff_tid = PARSEABLE.effective_tenant_for_stream(stream, tenant_id);
+        get_stream_metadata(stream.clone(), eff_tid)
+    });
     let stream_metadata_results: Vec<StreamMetadataResponse> =
         futures::future::join_all(stream_metadata_futures).await;
 
@@ -198,10 +213,10 @@ pub async fn generate_home_response(
     })
 }
 
-async fn get_stream_metadata(stream: String, tenant_id: &Option<String>) -> StreamMetadataResponse {
+async fn get_stream_metadata(stream: String, tenant_id: Option<String>) -> StreamMetadataResponse {
     let obs = PARSEABLE
         .metastore
-        .get_all_stream_jsons(&stream, None, tenant_id)
+        .get_all_stream_jsons(&stream, None, &tenant_id)
         .await?;
     let mut stream_jsons = Vec::new();
     for ob in obs {
@@ -290,11 +305,23 @@ async fn get_stream_titles(
     key: &SessionKey,
     tenant_id: &Option<String>,
 ) -> Result<Vec<String>, PrismHomeError> {
-    let stream_titles: Vec<String> = PARSEABLE
+    let mut all_streams = PARSEABLE
         .metastore
         .list_streams(tenant_id)
         .await
-        .map_err(|e| PrismHomeError::Anyhow(anyhow::Error::new(e)))?
+        .map_err(|e| PrismHomeError::Anyhow(anyhow::Error::new(e)))?;
+
+    // Include demo streams for subscribed tenants in search results too.
+    let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+    if is_subscribed_to_demo(effective_tenant) {
+        for demo_name in PARSEABLE.list_demo_stream_names() {
+            if !all_streams.contains(&demo_name) {
+                all_streams.insert(demo_name);
+            }
+        }
+    }
+
+    let stream_titles: Vec<String> = all_streams
         .into_iter()
         .filter(|logstream| {
             Users.authorize(key.clone(), Action::ListStream, Some(logstream), None)

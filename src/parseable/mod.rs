@@ -42,6 +42,34 @@ use tokio::try_join;
 use tracing::error;
 
 pub const DEFAULT_TENANT: &str = "DEFAULT_TENANT";
+/// Reserved tenant ID for the shared OTel demo data.
+pub const DEMO_TENANT: &str = "__demo__";
+
+/// Set of tenants that have subscribed to view the demo streams.
+/// Enterprise populates this at startup and via subscribe/unsubscribe APIs.
+pub static DEMO_SUBSCRIBERS: Lazy<RwLock<HashSet<String>>> =
+    Lazy::new(|| RwLock::new(HashSet::new()));
+
+pub fn subscribe_to_demo(tenant_id: &str) {
+    DEMO_SUBSCRIBERS
+        .write()
+        .expect("DEMO_SUBSCRIBERS lock")
+        .insert(tenant_id.to_owned());
+}
+
+pub fn unsubscribe_from_demo(tenant_id: &str) {
+    DEMO_SUBSCRIBERS
+        .write()
+        .expect("DEMO_SUBSCRIBERS lock")
+        .remove(tenant_id);
+}
+
+pub fn is_subscribed_to_demo(tenant_id: &str) -> bool {
+    DEMO_SUBSCRIBERS
+        .read()
+        .expect("DEMO_SUBSCRIBERS lock")
+        .contains(tenant_id)
+}
 
 #[cfg(feature = "kafka")]
 use crate::connectors::kafka::config::KafkaConfig;
@@ -214,15 +242,81 @@ impl Parseable {
         stream_name: &str,
         tenant_id: &Option<String>,
     ) -> Result<StreamRef, StreamNotFound> {
-        let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-        self.streams
-            .read()
-            .unwrap()
-            .get(tenant_id)
-            .ok_or_else(|| StreamNotFound(format!("{stream_name} with tenant {tenant_id}")))
-            .map(|v| v.get(stream_name))?
-            .ok_or_else(|| StreamNotFound(stream_name.to_owned()))
-            .cloned()
+        let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        let guard = self.streams.read().unwrap();
+
+        // 1. Check the tenant's own streams first.
+        if let Some(tenant_streams) = guard.get(effective_tenant) {
+            if let Some(stream) = tenant_streams.get(stream_name) {
+                return Ok(stream.clone());
+            }
+        }
+
+        // 2. For subscribed non-demo tenants fall back to shared demo streams.
+        if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
+            if let Some(demo_streams) = guard.get(DEMO_TENANT) {
+                if let Some(stream) = demo_streams.get(stream_name) {
+                    if stream.metadata.read().expect("metadata lock").shared {
+                        return Ok(stream.clone());
+                    }
+                }
+            }
+        }
+
+        Err(StreamNotFound(stream_name.to_owned()))
+    }
+
+    /// Returns true when `stream_name` lives in the demo tenant AND is marked
+    /// shared, and the requesting tenant is *not* the demo tenant itself.
+    /// Used by ingest handlers to enforce read-only access on demo streams.
+    pub fn is_shared_demo_stream(&self, stream_name: &str, tenant_id: &Option<String>) -> bool {
+        let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        if effective_tenant == DEMO_TENANT {
+            return false;
+        }
+        let guard = self.streams.read().unwrap();
+        guard
+            .get(DEMO_TENANT)
+            .and_then(|demo| demo.get(stream_name))
+            .map(|s| s.metadata.read().expect("metadata lock").shared)
+            .unwrap_or(false)
+    }
+
+    /// Returns the effective tenant ID to use for storage/metadata lookups for a
+    /// given stream.  If the stream is a shared demo stream visible to
+    /// `tenant_id`, this returns `Some(DEMO_TENANT)` so that callers
+    /// transparently redirect to the demo tenant's storage path.
+    pub fn effective_tenant_for_stream(
+        &self,
+        stream_name: &str,
+        tenant_id: &Option<String>,
+    ) -> Option<String> {
+        if self.is_shared_demo_stream(stream_name, tenant_id) {
+            Some(DEMO_TENANT.to_string())
+        } else {
+            tenant_id.clone()
+        }
+    }
+
+    /// Returns the names of all streams in the demo tenant that are marked as
+    /// shared.  Returns an empty `Vec` when the demo tenant has no streams or
+    /// does not exist yet.
+    pub fn list_demo_stream_names(&self) -> Vec<String> {
+        let guard = self.streams.read().unwrap();
+        guard
+            .get(DEMO_TENANT)
+            .map(|demo| {
+                demo.iter()
+                    .filter_map(|(name, stream)| {
+                        if stream.metadata.read().expect("metadata lock").shared {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Get the handle to a stream in staging, create one if it doesn't exist
@@ -434,6 +528,7 @@ impl Parseable {
         // Set hot tier fields from the stored metadata
         metadata.hot_tier_enabled = hot_tier_enabled;
         metadata.hot_tier.clone_from(&hot_tier);
+        metadata.shared = stream_metadata.shared;
 
         let ingestor_id = INGESTOR_META
             .get()

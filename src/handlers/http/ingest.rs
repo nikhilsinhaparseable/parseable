@@ -68,6 +68,10 @@ pub async fn ingest(
     if internal_stream_names.contains(&stream_name) {
         return Err(PostError::InternalStream(stream_name));
     }
+    // Reject writes into a shared demo stream from non-demo tenants.
+    if PARSEABLE.is_shared_demo_stream(&stream_name, &tenant_id) {
+        return Err(PostError::DemoStreamReadOnly(stream_name));
+    }
 
     let log_source = req
         .headers()
@@ -597,6 +601,8 @@ pub enum PostError {
     MissingQueryParameter,
     #[error(transparent)]
     MetastoreError(#[from] MetastoreError),
+    #[error("Stream '{0}' is a shared demo stream and is read-only for this tenant")]
+    DemoStreamReadOnly(String),
 }
 
 impl actix_web::ResponseError for PostError {
@@ -629,6 +635,8 @@ impl actix_web::ResponseError for PostError {
             | JsonFlattenError(_) => StatusCode::INTERNAL_SERVER_ERROR,
 
             StreamNotFound(_) => StatusCode::NOT_FOUND,
+
+            DemoStreamReadOnly(_) => StatusCode::FORBIDDEN,
 
             MetastoreError(e) => e.status_code(),
         }

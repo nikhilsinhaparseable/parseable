@@ -501,6 +501,7 @@ async fn setup_logstream_metadata(
         log_source,
         telemetry_type,
         dataset_tag,
+        shared: false,
     };
 
     Ok(metadata)
