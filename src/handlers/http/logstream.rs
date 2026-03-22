@@ -379,11 +379,13 @@ pub async fn get_stream_info(
         return Err(StreamNotFound(stream_name.clone()).into());
     }
 
+    // For shared demo streams, storage reads must go to the demo tenant's path.
+    let effective_tid = PARSEABLE.effective_tenant_for_stream(&stream_name, &tenant_id);
     let storage = PARSEABLE.storage().get_object_store();
 
     // Get first and latest event timestamps from storage
     let (stream_first_event_at, stream_latest_event_at) = match storage
-        .get_first_and_latest_event_from_storage(&stream_name, &tenant_id)
+        .get_first_and_latest_event_from_storage(&stream_name, &effective_tid)
         .await
     {
         Ok(result) => result,
@@ -396,11 +398,11 @@ pub async fn get_stream_info(
         }
     };
 
-    let tenant_id = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+    let lookup_tid = effective_tid.as_deref().unwrap_or(DEFAULT_TENANT);
     let hash_map = PARSEABLE.streams.read().unwrap();
     let stream_meta = hash_map
-        .get(tenant_id)
-        .ok_or_else(|| TenantNotFound(tenant_id.to_owned()))?
+        .get(lookup_tid)
+        .ok_or_else(|| TenantNotFound(lookup_tid.to_owned()))?
         .get(&stream_name)
         .ok_or_else(|| StreamNotFound(stream_name.clone()))?
         .metadata

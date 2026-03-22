@@ -350,14 +350,29 @@ impl Parseable {
         if self.streams.contains(stream_name, tenant_id) {
             return true;
         }
-        // For shared demo streams the data lives under the demo tenant;
-        // use the effective tenant so storage lookups go to the right path.
+        if self.options.mode != Mode::Query && self.options.mode != Mode::Prism {
+            return false;
+        }
+        // Try the effective tenant first (covers already-loaded shared demo streams).
         let effective_id = self.effective_tenant_for_stream(stream_name, tenant_id);
-        (self.options.mode == Mode::Query || self.options.mode == Mode::Prism)
-            && self
-                .create_stream_and_schema_from_storage(stream_name, &effective_id)
+        if self
+            .create_stream_and_schema_from_storage(stream_name, &effective_id)
+            .await
+            .unwrap_or_default()
+        {
+            return true;
+        }
+        // Fallback: if the tenant is subscribed to demo but the stream wasn't in the
+        // in-memory demo map yet (cold path), try loading from __demo__ directly.
+        let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
+        if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
+            let demo_tid = Some(DEMO_TENANT.to_owned());
+            return self
+                .create_stream_and_schema_from_storage(stream_name, &demo_tid)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+        }
+        false
     }
 
     // validate the storage, if the proper path for staging directory is provided

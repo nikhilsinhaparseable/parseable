@@ -460,16 +460,32 @@ pub async fn create_streams_for_distributed(
     if PARSEABLE.options.mode != Mode::Query && PARSEABLE.options.mode != Mode::Prism {
         return Ok(());
     }
+    let subscribed_tenant = tenant_id.clone();
     let mut join_set = JoinSet::new();
     for stream_name in streams {
         // For shared demo streams the data lives under the demo tenant;
         // redirect so `create_stream_and_schema_from_storage` looks in the
         // correct storage path instead of logging a spurious warning.
         let effective_id = PARSEABLE.effective_tenant_for_stream(&stream_name, tenant_id);
+        let subscribed_tenant = subscribed_tenant.clone();
         join_set.spawn(async move {
             let result = PARSEABLE
                 .create_stream_and_schema_from_storage(&stream_name, &effective_id)
                 .await;
+
+            // Cold-path fallback: if the stream wasn't found via effective_id (demo
+            // stream not yet in the in-memory map) but the tenant is subscribed to
+            // demo, try loading directly from __demo__.
+            if matches!(result, Ok(false)) {
+                use crate::parseable::{DEMO_TENANT, DEFAULT_TENANT, is_subscribed_to_demo};
+                let tid = subscribed_tenant.as_deref().unwrap_or(DEFAULT_TENANT);
+                if tid != DEMO_TENANT && is_subscribed_to_demo(tid) {
+                    let demo_tid = Some(DEMO_TENANT.to_owned());
+                    let _ = PARSEABLE
+                        .create_stream_and_schema_from_storage(&stream_name, &demo_tid)
+                        .await;
+                }
+            }
 
             if let Err(e) = &result {
                 warn!("Failed to create stream '{}': {}", stream_name, e);
