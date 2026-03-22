@@ -47,7 +47,7 @@ use tracing::{error, warn};
 
 use crate::event::{DEFAULT_TIMESTAMP_KEY, commit_schema};
 use crate::metrics::{QUERY_EXECUTE_TIME, increment_query_calls_by_date};
-use crate::parseable::{DEFAULT_TENANT, PARSEABLE, StreamNotFound};
+use crate::parseable::{DEFAULT_TENANT, DEMO_TENANT, PARSEABLE, StreamNotFound};
 use crate::query::error::ExecuteError;
 use crate::query::resolve_stream_names;
 use crate::query::{CountsRequest, QUERY_SESSION, Query as LogicalQuery, execute};
@@ -91,11 +91,22 @@ pub async fn get_records_and_fields(
     // check or load streams in memory
     create_streams_for_distributed(tables.clone(), tenant_id).await?;
 
+    // When all queried tables are shared demo streams, point DataFusion at the
+    // __demo__ schema so table resolution succeeds as `datafusion.__demo__.<table>`.
+    let default_schema = if !tables.is_empty()
+        && tables
+            .iter()
+            .all(|t| PARSEABLE.is_shared_demo_stream(t, tenant_id))
+    {
+        DEMO_TENANT.to_owned()
+    } else {
+        tenant_id.as_deref().unwrap_or("public").to_owned()
+    };
     session_state
         .config_mut()
         .options_mut()
         .catalog
-        .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
+        .default_schema = default_schema;
 
     let query: LogicalQuery = into_query(query_request, &session_state, time_range).await?;
 
@@ -124,11 +135,22 @@ pub async fn query(req: HttpRequest, query_request: Query) -> Result<HttpRespons
     create_streams_for_distributed(tables.clone(), &get_tenant_id_from_request(&req)).await?;
 
     let tenant_id = get_tenant_id_from_request(&req);
+    // When all queried tables are shared demo streams, point DataFusion at the
+    // __demo__ schema so table resolution succeeds as `datafusion.__demo__.<table>`.
+    let default_schema = if !tables.is_empty()
+        && tables
+            .iter()
+            .all(|t| PARSEABLE.is_shared_demo_stream(t, &tenant_id))
+    {
+        DEMO_TENANT.to_owned()
+    } else {
+        tenant_id.as_deref().unwrap_or("public").to_owned()
+    };
     session_state
         .config_mut()
         .options_mut()
         .catalog
-        .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
+        .default_schema = default_schema;
 
     let query: LogicalQuery = into_query(&query_request, &session_state, time_range).await?;
     let creds = extract_session_key_from_req(&req)?;
@@ -442,8 +464,11 @@ pub async fn update_schema_when_distributed(
     // as the schema is read from memory everytime
     if PARSEABLE.options.mode == Mode::Query || PARSEABLE.options.mode == Mode::Prism {
         for table in tables {
-            if let Ok(new_schema) = fetch_schema(table, tenant_id).await {
-                commit_schema(table, Arc::new(new_schema), tenant_id)?;
+            // For shared demo streams, fetch and commit schema under the demo tenant
+            // so that `commit_schema` finds the stream in the `__demo__` memory slot.
+            let effective_id = PARSEABLE.effective_tenant_for_stream(table, tenant_id);
+            if let Ok(new_schema) = fetch_schema(table, &effective_id).await {
+                commit_schema(table, Arc::new(new_schema), &effective_id)?;
             }
         }
     }
