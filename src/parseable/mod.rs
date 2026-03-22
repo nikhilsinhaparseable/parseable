@@ -362,10 +362,13 @@ impl Parseable {
         {
             return true;
         }
-        // Fallback: if the tenant is subscribed to demo but the stream wasn't in the
-        // in-memory demo map yet (cold path), try loading from __demo__ directly.
+        // Cold-path fallback: if the stream still wasn't found, try loading from
+        // __demo__ directly.  The Query node may not have subscription state synced
+        // (subscriptions are only tracked on the Prism node), so we skip the
+        // is_subscribed_to_demo check here.  The real security gate is the
+        // `shared = true` flag stored in the stream's persisted metadata.
         let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
-        if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
+        if effective_tenant != DEMO_TENANT {
             let demo_tid = Some(DEMO_TENANT.to_owned());
             return self
                 .create_stream_and_schema_from_storage(stream_name, &demo_tid)

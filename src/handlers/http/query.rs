@@ -498,13 +498,15 @@ pub async fn create_streams_for_distributed(
                 .create_stream_and_schema_from_storage(&stream_name, &effective_id)
                 .await;
 
-            // Cold-path fallback: if the stream wasn't found via effective_id (demo
-            // stream not yet in the in-memory map) but the tenant is subscribed to
-            // demo, try loading directly from __demo__.
+            // Cold-path fallback: if the stream wasn't found via effective_id, try
+            // loading from __demo__ directly.  The Query node may not have subscription
+            // state synced from the Prism node, so we skip the subscription check.
+            // The `shared = true` flag in the stream's persisted metadata is the real
+            // security gate.
             if matches!(result, Ok(false)) {
-                use crate::parseable::{DEMO_TENANT, DEFAULT_TENANT, is_subscribed_to_demo};
+                use crate::parseable::{DEMO_TENANT, DEFAULT_TENANT};
                 let tid = subscribed_tenant.as_deref().unwrap_or(DEFAULT_TENANT);
-                if tid != DEMO_TENANT && is_subscribed_to_demo(tid) {
+                if tid != DEMO_TENANT {
                     let demo_tid = Some(DEMO_TENANT.to_owned());
                     let _ = PARSEABLE
                         .create_stream_and_schema_from_storage(&stream_name, &demo_tid)
