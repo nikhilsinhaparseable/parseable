@@ -532,14 +532,19 @@ impl TableProvider for StandardTableProvider {
         let mut execution_plans = vec![];
         let glob_storage = PARSEABLE.storage.get_object_store();
 
-        let object_store_format: ObjectStoreFormat = serde_json::from_slice(
-            &PARSEABLE
-                .metastore
-                .get_stream_json(&self.stream, false, &self.tenant_id)
-                .await
-                .map_err(|e| DataFusionError::Plan(e.to_string()))?,
-        )
-        .map_err(|e| DataFusionError::Plan(e.to_string()))?;
+        // Read the main stream.json to get snapshot / time-partition info.
+        // If the file doesn't exist yet (e.g. stream was loaded from ingestor
+        // JSONs but the consolidated stream.json was never written), treat it
+        // as an empty snapshot — the query will return no rows rather than
+        // failing with an ObjectStorageError.
+        let object_store_format: ObjectStoreFormat = PARSEABLE
+            .metastore
+            .get_stream_json(&self.stream, false, &self.tenant_id)
+            .await
+            .ok()
+            .filter(|b| !b.is_empty())
+            .and_then(|b| serde_json::from_slice::<ObjectStoreFormat>(&b).ok())
+            .unwrap_or_default();
 
         let time_partition = object_store_format.time_partition;
         let mut time_filters = extract_primary_filter(filters, &time_partition);

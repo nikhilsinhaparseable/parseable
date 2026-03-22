@@ -676,14 +676,19 @@ pub trait ObjectStorage: Debug + Send + Sync + 'static {
         stream_name: &str,
         tenant_id: &Option<String>,
     ) -> Result<Bytes, ObjectStorageError> {
-        // create only when stream name not found in memory
+        // Stream already in memory — return the consolidated stream.json.
+        // If the file is missing (stream was loaded from ingestor JSONs without
+        // ever writing the main stream.json), fall through to Path 2 so the
+        // file gets (re)created from the ingestor JSONs.
         if PARSEABLE.get_stream(stream_name, tenant_id).is_ok() {
-            let stream_metadata_bytes = PARSEABLE
+            if let Ok(bytes) = PARSEABLE
                 .metastore
                 .get_stream_json(stream_name, false, tenant_id)
                 .await
-                .map_err(|e| ObjectStorageError::MetastoreError(Box::new(e.to_detail())))?;
-            return Ok(stream_metadata_bytes);
+            {
+                return Ok(bytes);
+            }
+            // File missing — fall through to rebuild from ingestor JSONs.
         }
         let mut all_log_sources: Vec<LogSourceEntry> = Vec::new();
 
