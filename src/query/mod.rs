@@ -201,6 +201,17 @@ impl Query {
                     let _ = catalog.register_schema(t, schema_provider);
                 }
             }
+            // Always register the __demo__ schema so that subscribed tenants can
+            // resolve shared demo stream tables even if the demo tenant was not
+            // present at startup or hasn't been added to the session yet.
+            use crate::parseable::DEMO_TENANT;
+            if catalog.schema(DEMO_TENANT).is_none() {
+                let demo_provider = Arc::new(GlobalSchemaProvider {
+                    storage: storage.get_object_store(),
+                    tenant_id: Some(DEMO_TENANT.to_owned()),
+                });
+                let _ = catalog.register_schema(DEMO_TENANT, demo_provider);
+            }
         } else {
             // register just one schema
             let schema_provider = Arc::new(GlobalSchemaProvider {
