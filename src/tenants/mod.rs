@@ -98,6 +98,12 @@ impl TenantMetadata {
         }
     }
 
+    pub fn set_global_ingestion_auth(&self, tenant_id: &str, auth: String) {
+        if let Some(mut tenant) = self.tenants.get_mut(tenant_id) {
+            tenant.meta.global_ingestion_auth = Some(auth);
+        }
+    }
+
     pub fn suspend_service(&self, tenant_id: &str, service: &Service) {
         if let Some(mut tenant) = self.tenants.get_mut(tenant_id) {
             tenant.suspended_services.insert(service.clone());
