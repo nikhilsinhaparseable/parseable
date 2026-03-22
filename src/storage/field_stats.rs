@@ -531,6 +531,20 @@ pub async fn get_dataset_stats(
     let offset = dataset_stats_request.offset.unwrap_or(0);
     let limit = dataset_stats_request.limit.unwrap_or(5);
     let tenant_id = get_tenant_id_from_request(&req);
+
+    // If the pstats stream has not been created yet for this tenant (e.g. no
+    // data has been ingested), return empty stats rather than forwarding a
+    // DataFusion query that would fail with "table not found".
+    let pstats_exists = PARSEABLE
+        .metastore
+        .list_streams(&tenant_id)
+        .await
+        .map(|streams| streams.contains(&DATASET_STATS_STREAM_NAME.to_string()))
+        .unwrap_or(false);
+    if !pstats_exists {
+        return Ok(HttpResponse::Ok().json(HashMap::<String, FieldStats>::new()));
+    }
+
     let sql = if dataset_stats_request.fields.is_empty() {
         build_stats_sql(&dataset_stats_request.dataset_name, None, offset, limit)
     } else {

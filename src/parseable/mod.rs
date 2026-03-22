@@ -501,7 +501,18 @@ impl Parseable {
             storage.create_schema_from_metastore(stream_name, tenant_id)
         )?;
         let stream_metadata = if stream_metadata_bytes.is_empty() {
-            ObjectStoreFormat::default()
+            // No ingestor metadata available; try reading the main stream.json to
+            // preserve flags like `shared` that only appear in the main metadata file.
+            match PARSEABLE
+                .metastore
+                .get_stream_json(stream_name, false, tenant_id)
+                .await
+            {
+                Ok(bytes) if !bytes.is_empty() => {
+                    serde_json::from_slice::<ObjectStoreFormat>(&bytes)?
+                }
+                _ => ObjectStoreFormat::default(),
+            }
         } else {
             serde_json::from_slice::<ObjectStoreFormat>(&stream_metadata_bytes)?
         };
