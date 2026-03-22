@@ -350,9 +350,12 @@ impl Parseable {
         if self.streams.contains(stream_name, tenant_id) {
             return true;
         }
+        // For shared demo streams the data lives under the demo tenant;
+        // use the effective tenant so storage lookups go to the right path.
+        let effective_id = self.effective_tenant_for_stream(stream_name, tenant_id);
         (self.options.mode == Mode::Query || self.options.mode == Mode::Prism)
             && self
-                .create_stream_and_schema_from_storage(stream_name, tenant_id)
+                .create_stream_and_schema_from_storage(stream_name, &effective_id)
                 .await
                 .unwrap_or_default()
     }
@@ -1255,6 +1258,9 @@ impl Parseable {
             {
                 let metadata: StorageMetadata = serde_json::from_slice(&meta)?;
 
+                if metadata.demo_subscribed {
+                    subscribe_to_demo(&tenant_id);
+                }
                 TENANT_METADATA.insert_tenant(tenant_id.clone(), metadata.clone());
                 recognized_tenants.push(tenant_id);
             } else if !is_multi_tenant {

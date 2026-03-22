@@ -537,7 +537,9 @@ impl CountsRequest {
             .unwrap_or_else(|| DEFAULT_TIMESTAMP_KEY.to_owned());
         // get time range
         let time_range = TimeRange::parse_human_time(&self.start_time, &self.end_time)?;
-        let all_manifest_files = get_manifest_list(&self.stream, &time_range, tenant_id).await?;
+        // Use effective tenant so shared demo streams read from the demo tenant's storage path.
+        let effective_id = PARSEABLE.effective_tenant_for_stream(&self.stream, tenant_id);
+        let all_manifest_files = get_manifest_list(&self.stream, &time_range, &effective_id).await?;
         // get bounds
         let counts = self.get_bounds(&time_range);
 
