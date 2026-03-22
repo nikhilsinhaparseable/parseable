@@ -1234,11 +1234,13 @@ impl Streams {
             vec![]
         };
 
-        // Append shared demo streams for subscribed non-demo tenants.
+        // Append demo streams for subscribed non-demo tenants.
         if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
             if let Some(demo_streams) = guard.get(DEMO_TENANT) {
                 for (name, stream) in demo_streams {
-                    if stream.metadata.read().expect(LOCK_EXPECT).shared && !streams.contains(name)
+                    if stream.metadata.read().expect(LOCK_EXPECT).stream_type
+                        != StreamType::Internal
+                        && !streams.contains(name)
                     {
                         streams.push(name.clone());
                     }

@@ -724,23 +724,10 @@ pub trait ObjectStorage: Debug + Send + Sync + 'static {
 
             let stream_ob_metadata =
                 serde_json::from_slice::<ObjectStoreFormat>(&stream_metadata_obs[0])?;
-            // Preserve flags like `shared` from the persisted main stream.json.
-            // Ingestor-written metadata does not carry these flags, so merging
-            // ingestor JSONs would otherwise overwrite them with false.
-            let existing_shared = PARSEABLE
-                .metastore
-                .get_stream_json(stream_name, false, tenant_id)
-                .await
-                .ok()
-                .filter(|b| !b.is_empty())
-                .and_then(|b| serde_json::from_slice::<ObjectStoreFormat>(&b).ok())
-                .map(|m| m.shared)
-                .unwrap_or(false);
             let stream_metadata = ObjectStoreFormat {
                 stats: FullStats::default(),
                 snapshot: Snapshot::default(),
                 log_source: merged_log_sources,
-                shared: existing_shared || stream_ob_metadata.shared,
                 ..stream_ob_metadata
             };
 

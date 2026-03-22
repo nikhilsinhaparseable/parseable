@@ -252,13 +252,11 @@ impl Parseable {
             }
         }
 
-        // 2. For subscribed non-demo tenants fall back to shared demo streams.
+        // 2. For subscribed non-demo tenants fall back to demo streams.
         if effective_tenant != DEMO_TENANT && is_subscribed_to_demo(effective_tenant) {
             if let Some(demo_streams) = guard.get(DEMO_TENANT) {
                 if let Some(stream) = demo_streams.get(stream_name) {
-                    if stream.metadata.read().expect("metadata lock").shared {
-                        return Ok(stream.clone());
-                    }
+                    return Ok(stream.clone());
                 }
             }
         }
@@ -266,9 +264,10 @@ impl Parseable {
         Err(StreamNotFound(stream_name.to_owned()))
     }
 
-    /// Returns true when `stream_name` lives in the demo tenant AND is marked
-    /// shared, and the requesting tenant is *not* the demo tenant itself.
-    /// Used by ingest handlers to enforce read-only access on demo streams.
+    /// Returns true when `stream_name` lives in the demo tenant as a
+    /// non-internal stream, and the requesting tenant is not the demo tenant
+    /// itself. The demo tenant exists solely to share data with other tenants,
+    /// so every non-internal stream it owns is implicitly shared.
     pub fn is_shared_demo_stream(&self, stream_name: &str, tenant_id: &Option<String>) -> bool {
         let effective_tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
         if effective_tenant == DEMO_TENANT {
@@ -278,7 +277,7 @@ impl Parseable {
         guard
             .get(DEMO_TENANT)
             .and_then(|demo| demo.get(stream_name))
-            .map(|s| s.metadata.read().expect("metadata lock").shared)
+            .map(|s| s.metadata.read().expect("metadata lock").stream_type != StreamType::Internal)
             .unwrap_or(false)
     }
 
@@ -298,9 +297,9 @@ impl Parseable {
         }
     }
 
-    /// Returns the names of all streams in the demo tenant that are marked as
-    /// shared.  Returns an empty `Vec` when the demo tenant has no streams or
-    /// does not exist yet.
+    /// Returns the names of all non-internal streams in the demo tenant.
+    /// Returns an empty `Vec` when the demo tenant has no streams or does not
+    /// exist yet.
     pub fn list_demo_stream_names(&self) -> Vec<String> {
         let guard = self.streams.read().unwrap();
         guard
@@ -308,7 +307,9 @@ impl Parseable {
             .map(|demo| {
                 demo.iter()
                     .filter_map(|(name, stream)| {
-                        if stream.metadata.read().expect("metadata lock").shared {
+                        if stream.metadata.read().expect("metadata lock").stream_type
+                            != StreamType::Internal
+                        {
                             Some(name.clone())
                         } else {
                             None
@@ -501,18 +502,7 @@ impl Parseable {
             storage.create_schema_from_metastore(stream_name, tenant_id)
         )?;
         let stream_metadata = if stream_metadata_bytes.is_empty() {
-            // No ingestor metadata available; try reading the main stream.json to
-            // preserve flags like `shared` that only appear in the main metadata file.
-            match PARSEABLE
-                .metastore
-                .get_stream_json(stream_name, false, tenant_id)
-                .await
-            {
-                Ok(bytes) if !bytes.is_empty() => {
-                    serde_json::from_slice::<ObjectStoreFormat>(&bytes)?
-                }
-                _ => ObjectStoreFormat::default(),
-            }
+            ObjectStoreFormat::default()
         } else {
             serde_json::from_slice::<ObjectStoreFormat>(&stream_metadata_bytes)?
         };
@@ -560,7 +550,6 @@ impl Parseable {
         // Set hot tier fields from the stored metadata
         metadata.hot_tier_enabled = hot_tier_enabled;
         metadata.hot_tier.clone_from(&hot_tier);
-        metadata.shared = stream_metadata.shared;
 
         let ingestor_id = INGESTOR_META
             .get()
