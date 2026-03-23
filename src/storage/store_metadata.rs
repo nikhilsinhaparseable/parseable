@@ -51,6 +51,16 @@ pub struct StaticStorageMetadata {
     pub deployment_id: uid::Uid,
 }
 
+/// Persisted Locust generator configuration for the `__demo__` tenant.
+/// Stored in the demo tenant's `parseable.json` so the generator can be
+/// automatically restarted when the Prism node restarts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DemoGeneratorConfig {
+    pub endpoint: String,
+    pub num_users: u32,
+    pub duration_secs: Option<u64>,
+}
+
 // Type for serialization and deserialization
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StorageMetadata {
@@ -85,6 +95,11 @@ pub struct StorageMetadata {
     /// Whether this tenant has subscribed to the shared demo streams.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub demo_subscribed: bool,
+    /// Persisted Locust generator config for the `__demo__` tenant.
+    /// Present only on the demo tenant's metadata; used to auto-restart
+    /// the generator after a Prism node restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demo_generator_config: Option<DemoGeneratorConfig>,
 }
 
 impl Default for StorageMetadata {
@@ -110,6 +125,7 @@ impl Default for StorageMetadata {
             plan: None,
             owner: None,
             demo_subscribed: false,
+            demo_generator_config: None,
         }
     }
 }
