@@ -23,7 +23,7 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
-use crate::{rbac::role::Action, storage::{DemoGeneratorConfig, StorageMetadata}};
+use crate::{rbac::role::Action, storage::StorageMetadata};
 
 pub static TENANT_METADATA: Lazy<Arc<TenantMetadata>> =
     Lazy::new(|| Arc::new(TenantMetadata::default()));
@@ -101,22 +101,6 @@ impl TenantMetadata {
     pub fn set_global_ingestion_auth(&self, tenant_id: &str, auth: String) {
         if let Some(mut tenant) = self.tenants.get_mut(tenant_id) {
             tenant.meta.global_ingestion_auth = Some(auth);
-        }
-    }
-
-    pub fn get_demo_generator_config(&self, tenant_id: &str) -> Option<DemoGeneratorConfig> {
-        self.tenants
-            .get(tenant_id)
-            .and_then(|t| t.meta.demo_generator_config.clone())
-    }
-
-    pub fn set_demo_generator_config(
-        &self,
-        tenant_id: &str,
-        config: Option<DemoGeneratorConfig>,
-    ) {
-        if let Some(mut tenant) = self.tenants.get_mut(tenant_id) {
-            tenant.meta.demo_generator_config = config;
         }
     }
 
