@@ -601,6 +601,13 @@ impl Server {
                         ),
                     )
                     .service(
+                        web::resource("/finalize").route(
+                            web::post()
+                                .to(logstream::finalize)
+                                .authorize_for_resource(Action::All),
+                        ),
+                    )
+                    .service(
                         web::resource("/retention")
                             // PUT "/logstream/{logstream}/retention" ==> Set retention for given logstream
                             .route(

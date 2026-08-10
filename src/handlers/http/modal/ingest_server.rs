@@ -270,6 +270,13 @@ impl IngestServer {
                     ),
                 )
                 .service(
+                    web::resource("/finalize").route(
+                        web::post()
+                            .to(logstream::finalize)
+                            .authorize_for_resource(Action::All),
+                    ),
+                )
+                .service(
                     web::scope("/retention").service(
                         web::resource("/cleanup").route(
                             web::post()

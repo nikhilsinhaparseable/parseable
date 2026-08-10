@@ -46,7 +46,7 @@ use crate::option::Mode;
 use crate::otel::logs::OTEL_LOG_KNOWN_FIELD_LIST;
 use crate::otel::metrics::OTEL_METRICS_KNOWN_FIELD_LIST;
 use crate::otel::traces::OTEL_TRACES_KNOWN_FIELD_LIST;
-use crate::parseable::{PARSEABLE, StreamNotFound};
+use crate::parseable::{PARSEABLE, StagingError, StreamNotFound};
 use crate::storage::{ObjectStorageError, StreamType};
 use crate::utils::get_tenant_id_from_request;
 use crate::utils::header_parsing::ParseHeaderError;
@@ -573,6 +573,8 @@ impl actix_web::ResponseError for PostError {
             | MissingQueryParameter
             | CreateStream(CreateStreamError::StreamNameValidation(_))
             | OtelNotSupported(_) => StatusCode::BAD_REQUEST,
+
+            Event(EventError::Staging(StagingError::Finalizing(_))) => StatusCode::CONFLICT,
 
             Event(_)
             | CreateStream(_)

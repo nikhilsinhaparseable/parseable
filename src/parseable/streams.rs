@@ -20,7 +20,7 @@
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::reader::StreamReader;
 use arrow_schema::{Field, Fields, Schema};
-use chrono::{NaiveDateTime, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Timelike, Utc};
 use derive_more::derive::{Deref, DerefMut};
 use itertools::Itertools;
 use once_cell::sync::{Lazy, OnceCell};
@@ -54,6 +54,7 @@ use ulid::Ulid;
 
 use crate::{
     LOCK_EXPECT, OBJECT_STORE_DATA_GRANULARITY,
+    catalog::column::TypedStatistics,
     cli::Options,
     event::{
         DEFAULT_TIMESTAMP_KEY,
@@ -63,7 +64,7 @@ use crate::{
     hottier::StreamHotTier,
     metadata::{LogStreamMetadata, SchemaVersion},
     metrics,
-    option::Mode,
+    option::{DAY_PARQUET_CUSTOM_PARTITION_ERROR, Mode, ParquetGrouping},
     parseable::{DEFAULT_TENANT, PARSEABLE},
     storage::{StreamType, object_storage::to_bytes, retention::Retention},
     sync::FLUSH_AND_CONVERT_RUNTIME,
@@ -188,6 +189,93 @@ fn arrow_path_to_parquet(
     Some(parquet_path)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DailyParquetGroup {
+    date: NaiveDate,
+}
+
+#[derive(Debug)]
+struct ParsedArrowPartition {
+    group: DailyParquetGroup,
+    hour: u32,
+    minute: u32,
+}
+
+fn parse_arrow_partition(path: &Path) -> Result<ParsedArrowPartition, StagingError> {
+    let filename = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| StagingError::InvalidArrowFilename(path.display().to_string()))?;
+    let partition_start = filename
+        .find("date=")
+        .ok_or_else(|| StagingError::InvalidArrowFilename(filename.to_string()))?;
+    let data_marker = filename
+        .rfind(".data")
+        .ok_or_else(|| StagingError::InvalidArrowFilename(filename.to_string()))?;
+    if partition_start >= data_marker {
+        return Err(StagingError::InvalidArrowFilename(filename.to_string()));
+    }
+
+    let parts = filename[partition_start..data_marker]
+        .split('.')
+        .collect_vec();
+    // date, hour, minute, writer identity. Extra components would represent
+    // custom partitions, which day grouping intentionally does not support.
+    if parts.len() != 4 {
+        return Err(StagingError::InvalidArrowFilename(filename.to_string()));
+    }
+
+    let date = parts[0]
+        .strip_prefix("date=")
+        .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .ok_or_else(|| StagingError::InvalidArrowFilename(filename.to_string()))?;
+    let hour = parts[1]
+        .strip_prefix("hour=")
+        .and_then(|hour| hour.parse::<u32>().ok())
+        .filter(|hour| *hour < 24)
+        .ok_or_else(|| StagingError::InvalidArrowFilename(filename.to_string()))?;
+    let minute = parts[2]
+        .strip_prefix("minute=")
+        .and_then(|minute| minute.split('-').next())
+        .and_then(|minute| minute.parse::<u32>().ok())
+        .filter(|minute| *minute < 60)
+        .ok_or_else(|| StagingError::InvalidArrowFilename(filename.to_string()))?;
+    Ok(ParsedArrowPartition {
+        group: DailyParquetGroup { date },
+        hour,
+        minute,
+    })
+}
+
+fn group_daily_arrow_files(
+    stream_staging_path: &Path,
+    arrow_files: Vec<PathBuf>,
+    random_string: &str,
+) -> Result<HashMap<PathBuf, Vec<PathBuf>>, StagingError> {
+    let mut daily_groups: HashMap<DailyParquetGroup, ((u32, u32), Vec<PathBuf>)> = HashMap::new();
+    for arrow_file in arrow_files {
+        let parsed = parse_arrow_partition(&arrow_file)?;
+        let anchor = (parsed.hour, parsed.minute);
+        let entry = daily_groups
+            .entry(parsed.group)
+            .or_insert_with(|| (anchor, Vec::new()));
+        entry.0 = entry.0.min(anchor);
+        entry.1.push(arrow_file);
+    }
+
+    let mut grouped = HashMap::with_capacity(daily_groups.len());
+    for (group, ((hour, minute), mut files)) in daily_groups {
+        files.sort();
+        let filename = format!(
+            "date={}.hour={hour:02}.minute={minute:02}.daily.data.{random_string}.parquet",
+            group.date
+        );
+        grouped.insert(stream_staging_path.join(filename), files);
+    }
+
+    Ok(grouped)
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("Stream not found: {0}")]
 pub struct StreamNotFound(pub String);
@@ -209,6 +297,7 @@ pub struct Stream {
     pub data_path: PathBuf,
     pub options: Arc<Options>,
     pub writer: Mutex<Writer>,
+    finalization_lock: RwLock<()>,
     schema_writer: Mutex<()>,
     pub ingestor_id: Option<String>,
 }
@@ -229,6 +318,7 @@ impl Stream {
             data_path,
             options,
             writer: Mutex::new(Writer::default()),
+            finalization_lock: RwLock::new(()),
             schema_writer: Mutex::new(()),
             ingestor_id,
         })
@@ -244,6 +334,10 @@ impl Stream {
         custom_partition_values: &HashMap<String, String>,
         stream_type: StreamType,
     ) -> Result<(), StagingError> {
+        let _finalization_guard = self
+            .finalization_lock
+            .try_read()
+            .map_err(|_| StagingError::Finalizing(self.stream_name.clone()))?;
         let _span = info_span!(
             "stream_push",
             stream_name = %self.stream_name,
@@ -384,7 +478,7 @@ impl Stream {
         group_minute: u128,
         init_signal: bool,
         shutdown_signal: bool,
-    ) -> HashMap<PathBuf, Vec<PathBuf>> {
+    ) -> Result<HashMap<PathBuf, Vec<PathBuf>>, StagingError> {
         let random_string = ulid::Ulid::new().to_string();
         let inprocess_dir = Self::inprocess_folder(&self.data_path, group_minute);
 
@@ -392,7 +486,7 @@ impl Stream {
         if !arrow_files.is_empty() {
             if let Err(e) = fs::create_dir_all(&inprocess_dir) {
                 error!("Failed to create inprocess directory: {e}");
-                return HashMap::new();
+                return Err(e.into());
             }
 
             self.move_arrow_files(arrow_files, &inprocess_dir);
@@ -410,33 +504,45 @@ impl Stream {
         &self,
         inprocess_dir: &Path,
         random_string: &str,
-    ) -> HashMap<PathBuf, Vec<PathBuf>> {
-        let mut grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    ) -> Result<HashMap<PathBuf, Vec<PathBuf>>, StagingError> {
         let Ok(dir) = fs::read_dir(inprocess_dir) else {
-            return grouped;
+            return Ok(HashMap::new());
         };
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq(ARROW_FILE_EXTENSION))
-            {
-                if let Some(parquet_path) =
-                    arrow_path_to_parquet(&self.data_path, &path, random_string)
-                {
-                    grouped.entry(parquet_path).or_default().push(path);
-                } else {
-                    warn!("Unexpected arrow file: {}", path.display());
-                }
-            }
-        }
-        chunk_arrow_file_groups(grouped)
+        let arrow_files = dir
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq(ARROW_FILE_EXTENSION))
+            })
+            .collect();
+        self.group_arrow_files_for_parquet(arrow_files, random_string)
     }
 
     /// Returns a mapping for inprocess arrow files (init_signal=true).
-    fn group_inprocess_arrow_files(&self, random_string: &str) -> HashMap<PathBuf, Vec<PathBuf>> {
+    fn group_inprocess_arrow_files(
+        &self,
+        random_string: &str,
+    ) -> Result<HashMap<PathBuf, Vec<PathBuf>>, StagingError> {
+        self.group_arrow_files_for_parquet(self.inprocess_arrow_files(), random_string)
+    }
+
+    fn group_arrow_files_for_parquet(
+        &self,
+        arrow_files: Vec<PathBuf>,
+        random_string: &str,
+    ) -> Result<HashMap<PathBuf, Vec<PathBuf>>, StagingError> {
+        if self.options.parquet_grouping == ParquetGrouping::Day {
+            if self.get_custom_partition().is_some() {
+                return Err(StagingError::DayParquetCustomPartition(
+                    DAY_PARQUET_CUSTOM_PARTITION_ERROR.to_string(),
+                ));
+            }
+            return group_daily_arrow_files(&self.data_path, arrow_files, random_string);
+        }
+
         let mut grouped: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for inprocess_file in self.inprocess_arrow_files() {
+        for inprocess_file in arrow_files {
             if let Some(parquet_path) =
                 arrow_path_to_parquet(&self.data_path, &inprocess_file, random_string)
             {
@@ -448,7 +554,7 @@ impl Stream {
                 warn!("Unexpected arrow file: {}", inprocess_file.display());
             }
         }
-        chunk_arrow_file_groups(grouped)
+        Ok(chunk_arrow_file_groups(grouped))
     }
 
     /// Returns arrow files for conversion, filtering by time and removing invalid files.
@@ -939,7 +1045,7 @@ impl Stream {
         let now = SystemTime::now();
         let group_minute = minute_from_system_time(now) - 1;
         let staging_files =
-            self.arrow_files_grouped_exclude_time(now, group_minute, init_signal, shutdown_signal);
+            self.arrow_files_grouped_exclude_time(now, group_minute, init_signal, shutdown_signal)?;
         span.record("file_group_count", staging_files.len());
         if staging_files.is_empty() {
             self.reset_staging_metrics(tenant_id);
@@ -970,6 +1076,21 @@ impl Stream {
                         time_partition,
                     )? {
                         return Ok(None)
+                    }
+
+                    if self.options.parquet_grouping == ParquetGrouping::Day
+                        && let Err(err) = self.validate_single_day_parquet(
+                            &part_path,
+                            time_partition.map_or(DEFAULT_TIMESTAMP_KEY, String::as_str),
+                        )
+                    {
+                        if let Err(remove_err) = remove_file(&part_path) {
+                            warn!(
+                                "Failed to remove invalid daily parquet {}: {remove_err}",
+                                part_path.display()
+                            );
+                        }
+                        return Err(err);
                     }
 
                     if let Err(e) = std::fs::rename(&part_path, &parquet_path) {
@@ -1104,6 +1225,78 @@ impl Stream {
         }
         trace!("Parquet file successfully constructed");
         Ok(true)
+    }
+
+    fn validate_single_day_parquet(
+        &self,
+        path: &Path,
+        time_partition: &str,
+    ) -> Result<(), StagingError> {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| StagingError::InvalidParquetDay(path.display().to_string()))?;
+        let expected_date = filename
+            .find("date=")
+            .and_then(|start| {
+                let date = &filename[start + "date=".len()..];
+                date.find('.').map(|end| &date[..end])
+            })
+            .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+            .ok_or_else(|| {
+                StagingError::InvalidParquetDay(format!(
+                    "could not read the group date from {}",
+                    path.display()
+                ))
+            })?;
+
+        let manifest =
+            crate::catalog::create_from_parquet_file(String::new(), path).map_err(|err| {
+                StagingError::InvalidParquetDay(format!(
+                    "could not inspect {}: {err}",
+                    path.display()
+                ))
+            })?;
+        let stats = manifest
+            .columns
+            .iter()
+            .find(|column| column.name == time_partition)
+            .and_then(|column| column.stats.as_ref())
+            .ok_or_else(|| {
+                StagingError::InvalidParquetDay(format!(
+                    "missing timestamp statistics for column {time_partition} in {}",
+                    path.display()
+                ))
+            })?;
+        let TypedStatistics::Int(stats) = stats else {
+            return Err(StagingError::InvalidParquetDay(format!(
+                "timestamp statistics for column {time_partition} are not integer milliseconds in {}",
+                path.display()
+            )));
+        };
+        let min = DateTime::<Utc>::from_timestamp_millis(stats.min).ok_or_else(|| {
+            StagingError::InvalidParquetDay(format!(
+                "invalid minimum timestamp {} in {}",
+                stats.min,
+                path.display()
+            ))
+        })?;
+        let max = DateTime::<Utc>::from_timestamp_millis(stats.max).ok_or_else(|| {
+            StagingError::InvalidParquetDay(format!(
+                "invalid maximum timestamp {} in {}",
+                stats.max,
+                path.display()
+            ))
+        })?;
+
+        if min.date_naive() != expected_date || max.date_naive() != expected_date {
+            return Err(StagingError::InvalidParquetDay(format!(
+                "{} spans {min} through {max}, but its group date is {expected_date}",
+                path.display()
+            )));
+        }
+
+        Ok(())
     }
 
     /// function to validate parquet files
@@ -1559,6 +1752,14 @@ impl Stream {
             );
         }
 
+        if self.options.parquet_grouping == ParquetGrouping::Day {
+            info!(
+                "Deferring parquet conversion for stream {} until explicit finalization",
+                self.stream_name
+            );
+            return Ok(());
+        }
+
         let start_convert = Instant::now();
 
         self.prepare_parquet(init_signal, shutdown_signal, tenant_id)?;
@@ -1571,6 +1772,28 @@ impl Stream {
         }
 
         Ok(())
+    }
+
+    pub fn finalize_parquet(&self, tenant_id: &Option<String>) -> Result<usize, StagingError> {
+        let _finalization_guard = self.finalization_lock.write().map_err(|poisoned| {
+            StagingError::PoisonError(PoisonError::new(format!(
+                "Finalization lock poisoned for stream {} - {}",
+                self.stream_name, poisoned
+            )))
+        })?;
+        let existing_files: HashSet<PathBuf> = self.parquet_files().into_iter().collect();
+
+        self.recover_orphan_part_files();
+        self.flush(true)?;
+        // init_signal includes Arrow files left in processing directories by an interrupted
+        // conversion; shutdown_signal includes the current writer in this explicit barrier.
+        self.prepare_parquet(true, true, tenant_id)?;
+
+        Ok(self
+            .parquet_files()
+            .into_iter()
+            .filter(|path| !existing_files.contains(path))
+            .count())
     }
 }
 
@@ -1961,6 +2184,41 @@ mod tests {
         staging.flush(true).unwrap();
     }
 
+    fn write_log_at(staging: &StreamRef, schema: &Schema, time: NaiveDateTime) {
+        let timestamp = time.and_utc().timestamp_millis();
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![timestamp; 3])),
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .unwrap();
+        staging
+            .push(
+                "abc",
+                &batch,
+                time,
+                &HashMap::new(),
+                StreamType::UserDefined,
+            )
+            .unwrap();
+        staging.flush(true).unwrap();
+    }
+
+    fn daily_test_schema() -> Schema {
+        Schema::new(vec![
+            Field::new(
+                DEFAULT_TIMESTAMP_KEY,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("id", DataType::Int32, false),
+            Field::new("value", DataType::Utf8, false),
+        ])
+    }
+
     #[test]
     fn different_minutes_multiple_arrow_files_to_parquet() {
         let temp_dir = TempDir::new().unwrap();
@@ -2072,6 +2330,163 @@ mod tests {
         // Verify parquet files were created and the arrow files deleted
         assert_eq!(staging.parquet_files().len(), 1);
         assert_eq!(staging.arrow_files().len(), 0);
+    }
+
+    #[test]
+    fn day_grouping_defers_regular_conversion() {
+        let temp_dir = TempDir::new().unwrap();
+        let options = Arc::new(Options {
+            local_staging_path: temp_dir.path().to_path_buf(),
+            parquet_grouping: ParquetGrouping::Day,
+            row_group_size: 1024,
+            ..Default::default()
+        });
+        let staging = Stream::new(
+            options,
+            "test_stream",
+            LogStreamMetadata::default(),
+            None,
+            &None,
+        );
+        let time = NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_opt(10, 15, 0)
+            .unwrap();
+        write_log_at(&staging, &daily_test_schema(), time);
+
+        staging.flush_and_convert(false, false, &None).unwrap();
+
+        assert_eq!(staging.arrow_files().len(), 1);
+        assert!(staging.parquet_files().is_empty());
+    }
+
+    #[test]
+    fn day_grouping_creates_one_parquet_per_utc_day() {
+        let temp_dir = TempDir::new().unwrap();
+        let options = Arc::new(Options {
+            local_staging_path: temp_dir.path().to_path_buf(),
+            parquet_grouping: ParquetGrouping::Day,
+            row_group_size: 1024,
+            ..Default::default()
+        });
+        let staging = Stream::new(
+            options,
+            "test_stream",
+            LogStreamMetadata::default(),
+            None,
+            &None,
+        );
+        let first_day = NaiveDate::from_ymd_opt(2024, 1, 2).unwrap();
+        write_log_at(
+            &staging,
+            &daily_test_schema(),
+            first_day.and_hms_opt(1, 5, 0).unwrap(),
+        );
+        write_log_at(
+            &staging,
+            &daily_test_schema(),
+            first_day.and_hms_opt(22, 45, 0).unwrap(),
+        );
+        write_log_at(
+            &staging,
+            &daily_test_schema(),
+            first_day.succ_opt().unwrap().and_hms_opt(3, 10, 0).unwrap(),
+        );
+
+        assert_eq!(staging.finalize_parquet(&None).unwrap(), 2);
+        assert_eq!(staging.parquet_files().len(), 2);
+        assert!(staging.arrow_files().is_empty());
+        assert!(staging.inprocess_arrow_files().is_empty());
+
+        let mut row_counts = staging
+            .parquet_files()
+            .into_iter()
+            .map(|path| {
+                let file = File::open(path).unwrap();
+                SerializedFileReader::new(file)
+                    .unwrap()
+                    .metadata()
+                    .file_metadata()
+                    .num_rows()
+            })
+            .collect_vec();
+        row_counts.sort_unstable();
+        assert_eq!(row_counts, vec![3, 6]);
+    }
+
+    #[test]
+    fn day_grouping_rejects_custom_partitions() {
+        let temp_dir = TempDir::new().unwrap();
+        let options = Arc::new(Options {
+            local_staging_path: temp_dir.path().to_path_buf(),
+            parquet_grouping: ParquetGrouping::Day,
+            ..Default::default()
+        });
+        let staging = Stream::new(
+            options,
+            "test_stream",
+            LogStreamMetadata::default(),
+            None,
+            &None,
+        );
+        staging.set_custom_partition(Some(&"region".to_string()));
+
+        let error = staging
+            .group_arrow_files_for_parquet(Vec::new(), "test")
+            .unwrap_err();
+
+        assert!(matches!(error, StagingError::DayParquetCustomPartition(_)));
+    }
+
+    #[test]
+    fn day_grouping_rejects_a_parquet_that_spans_utc_days() {
+        let temp_dir = TempDir::new().unwrap();
+        let options = Arc::new(Options {
+            local_staging_path: temp_dir.path().to_path_buf(),
+            parquet_grouping: ParquetGrouping::Day,
+            row_group_size: 1024,
+            ..Default::default()
+        });
+        let staging = Stream::new(
+            options,
+            "test_stream",
+            LogStreamMetadata::default(),
+            None,
+            &None,
+        );
+        let first = NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_opt(23, 59, 0)
+            .unwrap();
+        let second = first.checked_add_signed(TimeDelta::minutes(2)).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(daily_test_schema()),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    first.and_utc().timestamp_millis(),
+                    second.and_utc().timestamp_millis(),
+                ])),
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        staging
+            .push(
+                "abc",
+                &batch,
+                first,
+                &HashMap::new(),
+                StreamType::UserDefined,
+            )
+            .unwrap();
+        staging.flush(true).unwrap();
+
+        let error = staging.finalize_parquet(&None).unwrap_err();
+
+        assert!(matches!(error, StagingError::InvalidParquetDay(_)));
+        assert!(staging.parquet_files().is_empty());
+        assert_eq!(staging.inprocess_arrow_files().len(), 1);
     }
 
     #[tokio::test]

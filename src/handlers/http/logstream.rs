@@ -23,6 +23,7 @@ use crate::event::format::override_data_type;
 use crate::hottier::{CURRENT_HOT_TIER_VERSION, GLOBAL_HOTTIER, StreamHotTier};
 use crate::metadata::SchemaVersion;
 use crate::metrics::{EVENTS_INGESTED_DATE, EVENTS_INGESTED_SIZE_DATE, EVENTS_STORAGE_SIZE_DATE};
+use crate::option::{DAY_PARQUET_CUSTOM_PARTITION_ERROR, ParquetGrouping};
 use crate::parseable::{DEFAULT_TENANT, PARSEABLE, StreamNotFound};
 use crate::rbac::Users;
 use crate::rbac::role::Action;
@@ -44,6 +45,7 @@ use arrow_json::reader::infer_json_schema_from_iterator;
 use bytes::Bytes;
 use chrono::Utc;
 use itertools::Itertools;
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::sync::Arc;
@@ -112,6 +114,59 @@ pub async fn list(req: HttpRequest) -> Result<impl Responder, StreamError> {
         .collect_vec();
 
     Ok(web::Json(res))
+}
+
+#[derive(Serialize)]
+pub struct FinalizeResponse {
+    stream: String,
+    parquet_files_created: usize,
+}
+
+pub async fn finalize(
+    req: HttpRequest,
+    logstream: Path<String>,
+) -> Result<impl Responder, StreamError> {
+    if PARSEABLE.options.parquet_grouping != ParquetGrouping::Day {
+        return Err(StreamError::Custom {
+            msg: "stream finalization requires P_PARQUET_GROUPING=day".to_string(),
+            status: StatusCode::BAD_REQUEST,
+        });
+    }
+
+    let stream_name = logstream.into_inner();
+    let tenant_id = get_tenant_id_from_request(&req);
+    if !PARSEABLE
+        .check_or_load_stream(&stream_name, &tenant_id)
+        .await
+    {
+        return Err(StreamNotFound(stream_name).into());
+    }
+
+    let stream = PARSEABLE.get_stream(&stream_name, &tenant_id)?;
+    if stream.get_custom_partition().is_some() {
+        return Err(StreamError::Custom {
+            msg: DAY_PARQUET_CUSTOM_PARTITION_ERROR.to_string(),
+            status: StatusCode::BAD_REQUEST,
+        });
+    }
+    let finalization_tenant = tenant_id.clone();
+    let parquet_files_created =
+        tokio::task::spawn_blocking(move || stream.finalize_parquet(&finalization_tenant))
+            .await
+            .map_err(|err| {
+                StreamError::Anyhow(anyhow::anyhow!("finalization task failed: {err}"))
+            })??;
+
+    PARSEABLE
+        .storage
+        .get_object_store()
+        .upload_files_from_staging(&stream_name, tenant_id.clone())
+        .await?;
+
+    Ok(web::Json(FinalizeResponse {
+        stream: stream_name,
+        parquet_files_created,
+    }))
 }
 
 pub async fn detect_schema(Json(json): Json<Value>) -> Result<impl Responder, StreamError> {
@@ -607,6 +662,7 @@ pub mod error {
     use crate::{
         hottier::HotTierError,
         metastore::MetastoreError,
+        parseable::StagingError,
         parseable::StreamNotFound,
         storage::ObjectStorageError,
         tenants::TenantNotFound,
@@ -684,6 +740,8 @@ pub mod error {
         MetastoreError(#[from] MetastoreError),
         #[error("{0}")]
         TenantNotFoundError(#[from] TenantNotFound),
+        #[error("Staging Error: {0}")]
+        Staging(#[from] StagingError),
     }
 
     impl actix_web::ResponseError for StreamError {
@@ -703,6 +761,8 @@ pub mod error {
                 }
                 StreamError::StreamNotFound(_) => StatusCode::NOT_FOUND,
                 StreamError::TenantNotFoundError(_) => StatusCode::NOT_FOUND,
+                StreamError::Staging(StagingError::Finalizing(_)) => StatusCode::CONFLICT,
+                StreamError::Staging(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 StreamError::Custom { status, .. } => *status,
                 StreamError::UninitializedLogstream => StatusCode::METHOD_NOT_ALLOWED,
                 StreamError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,

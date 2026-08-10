@@ -69,7 +69,7 @@ use crate::{
     metastore::{
         metastore_traits::Metastore, metastores::object_store_metastore::ObjectStoreMetastore,
     },
-    option::Mode,
+    option::{DAY_PARQUET_CUSTOM_PARTITION_ERROR, Mode, ParquetGrouping},
     rbac::{
         Users,
         map::{mut_roles, mut_users, write_user_groups},
@@ -907,6 +907,12 @@ impl Parseable {
         if stream_type != StreamType::Internal {
             validator::stream_name(&stream_name, stream_type)?;
         }
+        if self.options.parquet_grouping == ParquetGrouping::Day && custom_partition.is_some() {
+            return Err(CreateStreamError::Custom {
+                msg: DAY_PARQUET_CUSTOM_PARTITION_ERROR.to_string(),
+                status: StatusCode::BAD_REQUEST,
+            });
+        }
         // Proceed to create log stream if it doesn't exist
         let storage = self.storage.get_object_store();
 
@@ -988,6 +994,13 @@ impl Parseable {
         custom_partition: Option<&String>,
         tenant_id: &Option<String>,
     ) -> Result<(), StreamError> {
+        if self.options.parquet_grouping == ParquetGrouping::Day && custom_partition.is_some() {
+            return Err(StreamError::Custom {
+                msg: DAY_PARQUET_CUSTOM_PARTITION_ERROR.to_string(),
+                status: StatusCode::BAD_REQUEST,
+            });
+        }
+
         let stream = self
             .get_stream(stream_name, tenant_id)
             .expect(STREAM_EXISTS);

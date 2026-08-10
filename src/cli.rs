@@ -26,7 +26,7 @@ use crate::connectors::kafka::config::KafkaConfig;
 
 use crate::{
     oidc::{self, OpenidConfig},
-    option::{Compression, Mode, validation},
+    option::{Compression, Mode, ParquetGrouping, validation},
     storage::{AzureBlobConfig, FSConfig, GcsConfig, S3Config},
 };
 
@@ -472,6 +472,15 @@ pub struct Options {
         help = "Number of rows in a row group"
     )]
     pub row_group_size: usize,
+
+    #[arg(
+        long,
+        env = "P_PARQUET_GROUPING",
+        default_value = "minute",
+        value_enum,
+        help = "Parquet grouping mode. Day keeps finalized Arrow files in staging until the stream finalize API is called and does not support custom partitions"
+    )]
+    pub parquet_grouping: ParquetGrouping,
 
     #[arg(
         long,

@@ -42,4 +42,12 @@ pub enum StagingError {
     PoisonError(#[from] PoisonError<String>),
     #[error("JSON Error {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Parquet finalization is in progress for stream {0}")]
+    Finalizing(String),
+    #[error("Invalid staged Arrow filename: {0}")]
+    InvalidArrowFilename(String),
+    #[error("Daily Parquet validation failed: {0}")]
+    InvalidParquetDay(String),
+    #[error("{0}")]
+    DayParquetCustomPartition(String),
 }

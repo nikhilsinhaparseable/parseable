@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+use clap::ValueEnum;
 use parquet::basic::{BrotliLevel, GzipLevel, ZstdLevel};
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +71,17 @@ pub enum Compression {
     Lz4Raw,
     Zstd,
 }
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParquetGrouping {
+    #[default]
+    Minute,
+    Day,
+}
+
+pub const DAY_PARQUET_CUSTOM_PARTITION_ERROR: &str =
+    "custom partitions are not supported when P_PARQUET_GROUPING=day";
 
 impl From<Compression> for parquet::basic::Compression {
     fn from(value: Compression) -> Self {
