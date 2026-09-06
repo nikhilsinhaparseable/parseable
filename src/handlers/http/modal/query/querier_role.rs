@@ -32,6 +32,7 @@ use crate::{
     parseable::DEFAULT_TENANT,
     rbac::{
         map::{mut_roles, mut_sessions, read_user_groups, roles, users},
+        policy::validate_role_policy,
         role::model::{Role, RoleType},
         roles_to_permission,
     },
@@ -55,6 +56,13 @@ pub async fn put(
     // validate the role name
     validator::user_role_name(&name).map_err(RoleError::ValidationError)?;
 
+    if body.deny_super_admin() {
+        return Err(RoleError::SuperAdminPrivilege);
+    }
+    validate_role_policy(&body, &tenant_id)
+        .await
+        .map_err(RoleError::PolicyValidation)?;
+
     // if role exists, then it should not be an internal role
     let role = if let Some(tenant_roles) = mut_roles().get_mut(tenant)
         && let Some(role) = tenant_roles.get_mut(&name)
@@ -69,10 +77,6 @@ pub async fn put(
     } else {
         body
     };
-
-    if role.deny_super_admin() {
-        return Err(RoleError::SuperAdminPrivilege);
-    }
 
     let mut metadata = get_metadata(&tenant_id).await?;
     metadata.roles.insert(name.clone(), role.clone());

@@ -26,6 +26,7 @@ use actix_web::{
 };
 
 use crate::rbac::map::roles;
+use crate::rbac::policy::validate_role_policy;
 use crate::rbac::role::model::{Role, RoleType, RoleUI};
 use crate::{
     parseable::{DEFAULT_TENANT, PARSEABLE},
@@ -51,6 +52,10 @@ pub async fn put(
     }
     let name = name.into_inner();
     let tenant_id = get_tenant_id_from_request(&req);
+
+    validate_role_policy(&role, &tenant_id)
+        .await
+        .map_err(RoleError::PolicyValidation)?;
 
     // validate the role name
     validator::user_role_name(&name).map_err(RoleError::ValidationError)?;
@@ -250,6 +255,8 @@ pub enum RoleError {
     ValidationError(#[from] UsernameValidationError),
     #[error("Cannot create a role with superadmin privilege.")]
     SuperAdminPrivilege,
+    #[error("Invalid row policy: {0}")]
+    PolicyValidation(String),
 }
 
 impl actix_web::ResponseError for RoleError {
@@ -258,6 +265,7 @@ impl actix_web::ResponseError for RoleError {
             Self::ObjectStorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::RoleInUse => StatusCode::BAD_REQUEST,
             Self::SuperAdminPrivilege => StatusCode::BAD_REQUEST,
+            Self::PolicyValidation(_) => StatusCode::BAD_REQUEST,
             Self::ProtectedRole => StatusCode::BAD_REQUEST,
             Self::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::SerdeError(_) => StatusCode::BAD_REQUEST,

@@ -179,6 +179,7 @@ pub mod model {
     use serde_json::Value;
 
     use crate::rbac::role::ParseableResourceType;
+    use crate::utils::Conditions;
 
     use super::{Action, RoleBuilder};
 
@@ -196,7 +197,24 @@ pub mod model {
         },
         Reader {
             resource: Option<ParseableResourceType>,
+            #[serde(rename = "rowPolicy", default, skip_serializing_if = "Option::is_none")]
+            row_policy: Option<RowPolicy>,
         },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct RowPolicy {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub allow: Vec<Conditions>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub deny: Vec<Conditions>,
+    }
+
+    impl RowPolicy {
+        pub fn is_empty(&self) -> bool {
+            self.allow.is_empty() && self.deny.is_empty()
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -250,6 +268,18 @@ pub mod model {
                 .iter()
                 .any(|p| p.eq(&DefaultPrivilege::SuperAdmin))
         }
+
+        pub fn has_row_policy(&self) -> bool {
+            self.actions.iter().any(|privilege| {
+                matches!(
+                    privilege,
+                    DefaultPrivilege::Reader {
+                        row_policy: Some(_),
+                        ..
+                    }
+                )
+            })
+        }
     }
 
     impl<'de> Deserialize<'de> for Role {
@@ -299,7 +329,7 @@ pub mod model {
                         writer_perm_builder()
                     }
                 }
-                DefaultPrivilege::Reader { resource } => {
+                DefaultPrivilege::Reader { resource, .. } => {
                     if let Some(resource) = resource.as_ref() {
                         reader_perm_builder().with_resource(resource.to_owned())
                     } else {
@@ -447,5 +477,60 @@ pub mod model {
             actions: vec![Action::Ingest],
             resource_type: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::model::Role;
+
+    #[test]
+    fn reader_role_round_trips_row_policy() {
+        let value = json!({
+            "actions": [{
+                "privilege": "reader",
+                "resource": { "stream": "logs" },
+                "rowPolicy": {
+                    "allow": [{
+                        "operator": "and",
+                        "conditionConfig": [{
+                            "column": "env",
+                            "operator": "=",
+                            "value": "staging",
+                            "type": "string"
+                        }]
+                    }],
+                    "deny": [{
+                        "operator": "and",
+                        "conditionConfig": [{
+                            "column": "region",
+                            "operator": "=",
+                            "value": "internal",
+                            "type": "string"
+                        }]
+                    }]
+                }
+            }],
+            "roleType": "user"
+        });
+
+        let role: Role = serde_json::from_value(value).unwrap();
+        assert!(role.has_row_policy());
+        let serialized = serde_json::to_value(&role).unwrap();
+        let reparsed: Role = serde_json::from_value(serialized).unwrap();
+        assert_eq!(reparsed, role);
+    }
+
+    #[test]
+    fn legacy_reader_role_defaults_to_no_row_policy() {
+        let value = json!([{
+            "privilege": "reader",
+            "resource": { "stream": "logs" }
+        }]);
+
+        let role: Role = serde_json::from_value(value).unwrap();
+        assert!(!role.has_row_policy());
     }
 }

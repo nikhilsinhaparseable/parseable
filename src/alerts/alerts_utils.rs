@@ -29,8 +29,8 @@ use tracing::trace;
 
 use crate::{
     alerts::{
-        AlertTrait, LogicalOperator, WhereConfigOperator,
-        alert_structs::{AlertQueryResult, ConditionConfig, Conditions, GroupResult},
+        AlertTrait,
+        alert_structs::{AlertQueryResult, GroupResult},
         resolve_alert_output_layout,
     },
     handlers::http::{
@@ -41,6 +41,7 @@ use crate::{
     parseable::PARSEABLE,
     query::{QUERY_SESSION, execute, resolve_stream_names},
     utils::time::TimeRange,
+    utils::{ConditionConfig, Conditions, LogicalOperator, WhereConfigOperator},
 };
 
 use super::{ALERTS, AlertError, AlertOperator, AlertState};
@@ -113,6 +114,7 @@ async fn execute_local_query(
         raw_logical_plan: raw_logical_plan.clone(),
         time_range: time_range.clone(),
         filter_tag: None,
+        mandatory_filters: HashMap::new(),
     };
 
     let (records, _) = execute(query, false, tenant_id)
@@ -678,7 +680,7 @@ impl Display for ValueType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alerts::{WhereConfigOperator, resolve_alert_output_layout};
+    use crate::{alerts::resolve_alert_output_layout, utils::WhereConfigOperator};
     use datafusion::prelude::SessionContext;
 
     const WRAPPED_AGGREGATE_QUERY: &str = r#"

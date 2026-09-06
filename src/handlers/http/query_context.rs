@@ -25,14 +25,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracing::{Span, debug, info, warn};
 
-use crate::alerts::{alert_structs::Conditions, alerts_utils::get_filter_string};
+use crate::alerts::alerts_utils::get_filter_string;
 use crate::event::DEFAULT_TIMESTAMP_KEY;
 use crate::handlers::http::query::{
     Query, QueryError, create_streams_for_distributed, get_records_and_fields_for_authorized_query,
 };
 use crate::metrics::increment_query_calls_by_date;
 use crate::parseable::{DEFAULT_TENANT, PARSEABLE};
-use crate::rbac::Users;
+use crate::rbac::{Users, map::SessionKey};
+use crate::utils::Conditions;
 use crate::utils::actix::extract_session_key_from_req;
 use crate::utils::arrow::record_batches_to_json;
 use crate::utils::time::{
@@ -191,6 +192,7 @@ pub async fn query_context(
         &authorized_datasets,
         &context_start_time_str,
         &context_end_time_str,
+        &creds,
         &tenant_id,
     )
     .await?;
@@ -242,8 +244,8 @@ pub async fn query_context(
     );
 
     let (newer_records, older_records) = tokio::try_join!(
-        execute_log_context_rows(&newer_payload, &authorized_datasets, &tenant_id),
-        execute_log_context_rows(&older_payload, &authorized_datasets, &tenant_id),
+        execute_log_context_rows(&newer_payload, &authorized_datasets, &creds, &tenant_id),
+        execute_log_context_rows(&older_payload, &authorized_datasets, &creds, &tenant_id),
     )?;
     let (records, anchor_index) =
         build_log_context_records_window(newer_records, older_records, page_size)?;
@@ -919,6 +921,7 @@ async fn execute_log_context_anchor_count(
     authorized_datasets: &[String],
     start_time: &str,
     end_time: &str,
+    creds: &SessionKey,
     tenant_id: &Option<String>,
 ) -> Result<u64, QueryError> {
     Span::current().record("tenant", tracing::field::debug(tenant_id));
@@ -934,9 +937,13 @@ async fn execute_log_context_anchor_count(
         filter_tags: None,
     };
 
-    let (records, _) =
-        get_records_and_fields_for_authorized_query(&query_request, authorized_datasets, tenant_id)
-            .await?;
+    let (records, _) = get_records_and_fields_for_authorized_query(
+        &query_request,
+        authorized_datasets,
+        creds,
+        tenant_id,
+    )
+    .await?;
     let records = records.unwrap_or_default();
     let rows = record_batches_to_json(&records)?;
     let row = rows
@@ -965,6 +972,7 @@ async fn execute_log_context_anchor_count(
 async fn execute_log_context_rows(
     payload: &LogContextQueryPayload,
     authorized_datasets: &[String],
+    creds: &SessionKey,
     tenant_id: &Option<String>,
 ) -> Result<Vec<Value>, QueryError> {
     Span::current().record("tenant", tracing::field::debug(tenant_id));
@@ -980,9 +988,13 @@ async fn execute_log_context_rows(
         filter_tags: None,
     };
 
-    let (records, _) =
-        get_records_and_fields_for_authorized_query(&query_request, authorized_datasets, tenant_id)
-            .await?;
+    let (records, _) = get_records_and_fields_for_authorized_query(
+        &query_request,
+        authorized_datasets,
+        creds,
+        tenant_id,
+    )
+    .await?;
     let records = records.unwrap_or_default();
     let records: Vec<Value> = record_batches_to_json(&records)?
         .into_iter()

@@ -62,7 +62,6 @@ use tracing::Instrument;
 use self::error::ExecuteError;
 use self::stream_schema_provider::GlobalSchemaProvider;
 pub use self::stream_schema_provider::PartialTimeFilter;
-use crate::alerts::alert_structs::Conditions;
 use crate::alerts::alerts_utils::get_filter_string;
 use crate::catalog::Snapshot as CatalogSnapshot;
 use crate::catalog::column::{Int64Type, TypedStatistics};
@@ -73,7 +72,9 @@ use crate::handlers::http::query::QueryError;
 use crate::metrics::increment_bytes_scanned_in_query_by_date;
 use crate::option::Mode;
 use crate::parseable::{DEFAULT_TENANT, PARSEABLE};
+use crate::rbac::policy::{MandatoryQueryFilters, validate_query_against_mandatory_filters};
 use crate::storage::{ObjectStorage, ObjectStorageProvider, ObjectStoreFormat};
+use crate::utils::Conditions;
 use crate::utils::time::{DATE_BIN_EPOCH_ANCHOR, TimeRange, count_api_bin_interval};
 
 /// Boxed record-batch stream used as the streaming half of query results.
@@ -223,6 +224,7 @@ pub struct Query {
     pub raw_logical_plan: LogicalPlan,
     pub time_range: TimeRange,
     pub filter_tag: Option<Vec<String>>,
+    pub mandatory_filters: MandatoryQueryFilters,
 }
 
 impl Query {
@@ -371,7 +373,7 @@ impl Query {
     pub async fn execute(&self, is_streaming: bool, tenant_id: &Option<String>) -> QueryResult {
         let ctx = QUERY_SESSION.get_ctx();
         let df = ctx
-            .execute_logical_plan(self.final_logical_plan(tenant_id))
+            .execute_logical_plan(self.final_logical_plan(tenant_id)?)
             .await?;
         let tenant = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
         let fields = df
@@ -453,23 +455,27 @@ impl Query {
     ) -> Result<DataFrame, ExecuteError> {
         let df = QUERY_SESSION
             .get_ctx()
-            .execute_logical_plan(self.final_logical_plan(tenant_id))
+            .execute_logical_plan(self.final_logical_plan(tenant_id)?)
             .await?;
 
         Ok(df)
     }
 
     /// return logical plan with all time filters applied through
-    fn final_logical_plan(&self, tenant_id: &Option<String>) -> LogicalPlan {
+    fn final_logical_plan(&self, tenant_id: &Option<String>) -> Result<LogicalPlan, ExecuteError> {
+        validate_query_against_mandatory_filters(&self.raw_logical_plan, &self.mandatory_filters)
+            .map_err(ExecuteError::Unauthorized)?;
         // see https://github.com/apache/arrow-datafusion/pull/8400
         // this can be eliminated in later version of datafusion but with slight caveat
         // transform cannot modify stringified plans by itself
         // we by knowing this plan is not in the optimization procees chose to overwrite the stringified plan
 
-        match self.raw_logical_plan.clone() {
+        Ok(match self.raw_logical_plan.clone() {
             LogicalPlan::Explain(plan) => {
+                let policy_filtered =
+                    inject_mandatory_filters(plan.plan.as_ref().clone(), &self.mandatory_filters)?;
                 let transformed = transform(
-                    plan.plan.as_ref().clone(),
+                    policy_filtered,
                     self.time_range.start.naive_utc(),
                     self.time_range.end.naive_utc(),
                     tenant_id,
@@ -489,19 +495,24 @@ impl Query {
                 })
             }
             x => {
+                let policy_filtered = inject_mandatory_filters(x, &self.mandatory_filters);
                 transform(
-                    x,
+                    policy_filtered?,
                     self.time_range.start.naive_utc(),
                     self.time_range.end.naive_utc(),
                     tenant_id,
                 )
                 .data
             }
-        }
+        })
     }
 
     /// Evaluates to Some("count(*)") | Some("column_name") if the logical plan is a Projection: SELECT COUNT(*) | SELECT COUNT(*) as column_name
     pub fn is_logical_plan_count_without_filters(&self) -> Option<&String> {
+        if !self.mandatory_filters.is_empty() {
+            return None;
+        }
+
         // Check if the raw logical plan is a Projection: SELECT
         let LogicalPlan::Projection(Projection { input, expr, .. }) = &self.raw_logical_plan else {
             return None;
@@ -738,6 +749,27 @@ impl CountsRequest {
         Ok(bounds)
     }
 
+    /// Build counts SQL with request-aligned bins. Used when row policies require scanning data
+    /// even though the caller did not supply count conditions.
+    pub async fn get_policy_df_sql(&self, time_column: String) -> Result<String, QueryError> {
+        let time_range = TimeRange::parse_human_time(&self.start_time, &self.end_time)?;
+        let table_ref = quote_identifier(&self.stream);
+        let time_column_ref = format!("{}.{}", table_ref, quote_identifier(&time_column));
+        let queries = self
+            .get_bounds(&time_range)?
+            .into_iter()
+            .map(|bound| {
+                let start = bound.start.naive_utc();
+                let end = bound.end.naive_utc();
+                format!(
+                    "SELECT CAST(TIMESTAMP '{start}' AS TEXT) AS _bin_start_time_, TIMESTAMP '{end}' AS _bin_end_time_, COUNT(*) AS count FROM {table_ref} WHERE {time_column_ref} >= TIMESTAMP '{start}' AND {time_column_ref} < TIMESTAMP '{end}'"
+                )
+            })
+            .join(" UNION ALL ");
+
+        Ok(format!("{queries} ORDER BY _bin_end_time_"))
+    }
+
     /// This function will get executed only if self.conditions is some
     pub async fn get_df_sql(&self, time_column: String) -> Result<String, QueryError> {
         // unwrap because we have asserted that it is some
@@ -964,6 +996,23 @@ fn transform(
     .expect("transform processes all plan nodes")
 }
 
+pub fn inject_mandatory_filters(
+    plan: LogicalPlan,
+    mandatory_filters: &MandatoryQueryFilters,
+) -> datafusion::error::Result<LogicalPlan> {
+    let transformed = plan.transform_up_with_subqueries(&|plan| match plan {
+        LogicalPlan::TableScan(table) => {
+            let Some(filter) = mandatory_filters.get(table.table_name.table()) else {
+                return Ok(Transformed::no(LogicalPlan::TableScan(table)));
+            };
+            let filter = Filter::try_new(filter.clone(), Arc::new(LogicalPlan::TableScan(table)))?;
+            Ok(Transformed::yes(LogicalPlan::Filter(filter)))
+        }
+        _ => Ok(Transformed::no(plan)),
+    })?;
+    Ok(transformed.data)
+}
+
 fn table_contains_any_time_filters(
     table: &datafusion::logical_expr::TableScan,
     time_partition: Option<&String>,
@@ -1051,6 +1100,8 @@ pub mod error {
         Timeout(Elapsed, u64),
         #[error("{0}: Not enough memory available to serve the request")]
         ServerBusy(Elapsed),
+        #[error("{0}")]
+        Unauthorized(String),
     }
 
     impl actix_web::ResponseError for ExecuteError {
@@ -1061,6 +1112,7 @@ pub mod error {
                 ExecuteError::StreamNotFound(_) => StatusCode::NOT_FOUND,
                 ExecuteError::Timeout(_, _) => StatusCode::REQUEST_TIMEOUT,
                 ExecuteError::ServerBusy(_) => StatusCode::SERVICE_UNAVAILABLE,
+                ExecuteError::Unauthorized(_) => StatusCode::FORBIDDEN,
             }
         }
 
@@ -1161,11 +1213,94 @@ impl PartitionedMetricMonitor {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use datafusion::{
+        arrow::{
+            array::{StringArray, TimestampMillisecondArray},
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatch,
+            util::display::array_value_to_string,
+        },
+        common::Column,
+        datasource::MemTable,
+        prelude::{Expr, SessionContext, lit},
+    };
     use serde_json::json;
 
     use crate::query::{
-        CountConditions, CountsRequest, flatten_objects_for_count, resolve_stream_names,
+        CountConditions, CountsRequest, Query, flatten_objects_for_count, resolve_stream_names,
     };
+    use crate::utils::time::TimeRange;
+
+    #[tokio::test]
+    async fn mandatory_filter_is_injected_above_matching_table_scan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("env", DataType::Utf8, true),
+            Field::new(
+                "p_timestamp",
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("staging"), Some("prod"), None])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_704_067_200_000,
+                    1_704_067_200_000,
+                    1_704_067_200_000,
+                ])),
+            ],
+        )
+        .unwrap();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        let context = SessionContext::new();
+        context.register_table("logs", Arc::new(table)).unwrap();
+        let plan = context
+            .state()
+            .create_logical_plan("SELECT COUNT(*) FROM logs")
+            .await
+            .unwrap();
+        let time_range =
+            TimeRange::parse_human_time("2024-01-01T00:00:00Z", "2024-01-01T01:00:00Z").unwrap();
+        let mut mandatory_filters = HashMap::new();
+        mandatory_filters.insert(
+            "logs".to_string(),
+            Expr::Column(Column::new_unqualified("env")).eq(lit("staging")),
+        );
+
+        let query = Query {
+            raw_logical_plan: plan,
+            time_range,
+            filter_tag: None,
+            mandatory_filters,
+        };
+        let filtered = super::inject_mandatory_filters(
+            query.raw_logical_plan.clone(),
+            &query.mandatory_filters,
+        )
+        .unwrap();
+        let rendered = filtered.display_indent().to_string();
+
+        assert!(rendered.contains("Filter: env = Utf8(\"staging\")"));
+        assert!(query.is_logical_plan_count_without_filters().is_none());
+
+        let batches = context
+            .execute_logical_plan(filtered)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(
+            array_value_to_string(batches[0].column(0).as_ref(), 0).unwrap(),
+            "1"
+        );
+    }
 
     #[test]
     fn test_count_conditions_accepts_top_k() {
@@ -1269,6 +1404,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("topK must be greater than 0"));
+    }
+
+    #[tokio::test]
+    async fn policy_counts_sql_uses_standard_count_bounds() {
+        let request = CountsRequest {
+            stream: "logs".to_string(),
+            start_time: "2024-01-01T00:00:00Z".to_string(),
+            end_time: "2024-01-01T00:10:00Z".to_string(),
+            num_bins: Some(3),
+            conditions: None,
+        };
+
+        let sql = request
+            .get_policy_df_sql("p_timestamp".to_string())
+            .await
+            .unwrap();
+        let time_range =
+            TimeRange::parse_human_time(&request.start_time, &request.end_time).unwrap();
+        let expected_bins = request.get_bounds(&time_range).unwrap().len();
+
+        assert_eq!(sql.matches("SELECT CAST").count(), expected_bins);
+        assert_eq!(sql.matches("UNION ALL").count(), expected_bins - 1);
+        assert!(sql.contains("2024-01-01 00:00:00"));
+        assert!(sql.contains("2024-01-01 00:10:00"));
     }
 
     #[test]

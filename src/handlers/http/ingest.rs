@@ -466,6 +466,7 @@ pub async fn post_event(
 pub async fn push_logs_unchecked(
     batches: RecordBatch,
     stream_name: &str,
+    tenant_id: &Option<String>,
 ) -> Result<event::Event, PostError> {
     let unchecked_event = event::Event {
         rb: batches,
@@ -478,7 +479,7 @@ pub async fn push_logs_unchecked(
         custom_partition_values: HashMap::new(), // should be an empty map for unchecked push
         stream_type: StreamType::UserDefined,
         telemetry_type: TelemetryType::Logs,
-        tenant_id: None,
+        tenant_id: tenant_id.clone(),
     };
     unchecked_event.process_unchecked()?;
 

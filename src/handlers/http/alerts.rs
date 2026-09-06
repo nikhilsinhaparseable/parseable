@@ -26,7 +26,7 @@ use crate::{
         alert_traits::AlertTrait,
         alert_types::ThresholdAlert,
         target::Retry,
-        user_auth_for_alert_config,
+        user_auth_for_alert_config, user_writer_auth_for_alert_config,
     },
     metastore::metastore_traits::MetastoreObject,
     parseable::PARSEABLE,
@@ -251,6 +251,7 @@ pub async fn post(
 ) -> Result<impl Responder, AlertError> {
     let tenant_id = get_tenant_id_from_request(&req);
     let mut alert: AlertConfig = alert.into(tenant_id.clone()).await?;
+    let session_key = extract_session_key_from_req(&req)?;
 
     if alert.notification_config.interval > alert.get_eval_frequency() {
         return Err(AlertError::ValidationFailure(
@@ -280,6 +281,8 @@ pub async fn post(
 
     alert.notification_config.times = Retry::Finite(times);
 
+    user_writer_auth_for_alert_config(&session_key, &alert).await?;
+
     let threshold_alert;
     let alert: &dyn AlertTrait = match &alert.alert_type {
         AlertType::Threshold => {
@@ -303,8 +306,6 @@ pub async fn post(
 
     // validate the incoming alert query
     // does the user have access to these tables or not?
-    let session_key = extract_session_key_from_req(&req)?;
-
     alert.validate(&session_key).await?;
 
     // update persistent storage first
@@ -543,13 +544,16 @@ pub async fn modify_alert(
 
     // Validate and prepare the new alert
     let alert = alerts.get_alert_by_id(alert_id, &tenant_id).await?;
-    user_auth_for_alert_config(&session_key, &alert.to_alert_config()).await?;
+    let existing_config = alert.to_alert_config();
+    user_writer_auth_for_alert_config(&session_key, &existing_config).await?;
+    user_auth_for_alert_config(&session_key, &existing_config).await?;
 
     let mut new_config = alert_request.into(tenant_id.clone()).await?;
     if &new_config.alert_type != alert.get_alert_type() {
         return Err(AlertError::InvalidAlertModifyRequest);
     }
 
+    user_writer_auth_for_alert_config(&session_key, &new_config).await?;
     user_auth_for_alert_config(&session_key, &new_config).await?;
 
     // Calculate notification config

@@ -43,7 +43,7 @@ use crate::utils::arrow::flight::{
     send_to_ingester,
 };
 use crate::utils::time::TimeRange;
-use crate::utils::user_auth_for_datasets;
+use crate::utils::{get_tenant_id_from_key, user_auth_for_datasets};
 use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PutResult, SchemaAsIpc, SchemaResult, Ticket,
@@ -56,6 +56,7 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::handlers::livetail::extract_session_key;
 use crate::rbac;
 use crate::rbac::Users;
+use crate::rbac::policy::mandatory_filters_for_session;
 
 #[derive(Clone, Debug)]
 pub struct AirServiceImpl {}
@@ -127,6 +128,20 @@ impl FlightService for AirServiceImpl {
         let key = extract_session_key(req.metadata())
             .map_err(|e| Status::unauthenticated(e.to_string()))?;
 
+        match Users.authorize(key.clone(), rbac::role::Action::Query, None, None) {
+            rbac::Response::Authorized => (),
+            rbac::Response::UnAuthorized => {
+                return Err(Status::permission_denied(
+                    "user is not authorized to access this resource",
+                ));
+            }
+            rbac::Response::ReloadRequired => {
+                return Err(Status::unauthenticated("reload required"));
+            }
+            rbac::Response::Suspended(_) => return Err(Status::permission_denied("Suspended")),
+        }
+        let tenant_id = get_tenant_id_from_key(&key);
+
         let ticket =
             get_query_from_ticket(&req).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let streams = resolve_stream_names(&ticket.query).map_err(|e| {
@@ -136,7 +151,12 @@ impl FlightService for AirServiceImpl {
         info!("query requested to airplane: {:?}", ticket);
 
         // get the query session_state
-        let session_state = QUERY_SESSION.get_ctx().state();
+        let mut session_state = QUERY_SESSION.get_ctx().state();
+        session_state
+            .config_mut()
+            .options_mut()
+            .catalog
+            .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
 
         let time_range = TimeRange::parse_human_time(&ticket.start_time, &ticket.end_time)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -147,8 +167,17 @@ impl FlightService for AirServiceImpl {
             .ok_or_else(|| Status::aborted("Malformed SQL Provided, Table Name Not Found"))?
             .to_owned();
 
+        let permissions = Users.get_permissions(&key);
+        user_auth_for_datasets(&permissions, &streams, &tenant_id)
+            .await
+            .map_err(|_| {
+                Status::permission_denied("User Does not have permission to access this")
+            })?;
+        let mandatory_filters = mandatory_filters_for_session(&key, &tenant_id, &streams)
+            .map_err(Status::permission_denied)?;
+
         // map payload to query
-        let query = into_query(&ticket, &session_state, time_range)
+        let query = into_query(&ticket, &session_state, time_range, mandatory_filters)
             .await
             .map_err(|_| Status::internal("Failed to parse query"))?;
 
@@ -166,9 +195,10 @@ impl FlightService for AirServiceImpl {
             })
             .to_string();
 
-            let ingester_metadatas: Vec<NodeMetadata> = get_node_info(NodeType::Ingestor, &None)
-                .await
-                .map_err(|err| Status::failed_precondition(err.to_string()))?;
+            let ingester_metadatas: Vec<NodeMetadata> =
+                get_node_info(NodeType::Ingestor, &tenant_id)
+                    .await
+                    .map_err(|err| Status::failed_precondition(err.to_string()))?;
             let mut minute_result: Vec<RecordBatch> = vec![];
 
             for im in ingester_metadatas {
@@ -177,36 +207,15 @@ impl FlightService for AirServiceImpl {
                 }
             }
             let mr = minute_result.iter().collect::<Vec<_>>();
-            let event = append_temporary_events(&stream_name, mr).await?;
+            let event = append_temporary_events(&stream_name, mr, &tenant_id).await?;
             Some(event)
         } else {
             None
         };
 
-        // try authorize
-        match Users.authorize(key.clone(), rbac::role::Action::Query, None, None) {
-            rbac::Response::Authorized => (),
-            rbac::Response::UnAuthorized => {
-                return Err(Status::permission_denied(
-                    "user is not authorized to access this resource",
-                ));
-            }
-            rbac::Response::ReloadRequired => {
-                return Err(Status::unauthenticated("reload required"));
-            }
-            rbac::Response::Suspended(_) => return Err(Status::permission_denied("Suspended")),
-        }
-
-        let permissions = Users.get_permissions(&key);
-
-        user_auth_for_datasets(&permissions, &streams, &None)
-            .await
-            .map_err(|_| {
-                Status::permission_denied("User Does not have permission to access this")
-            })?;
         let time = Instant::now();
 
-        let (records, _) = execute(query, false, &None)
+        let (records, _) = execute(query, false, &tenant_id)
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
 
@@ -235,7 +244,9 @@ impl FlightService for AirServiceImpl {
 
         if event.is_some() {
             // Clear staging of stream once airplane has taxied
-            let _ = PARSEABLE.get_or_create_stream(&stream_name, &None).clear();
+            let _ = PARSEABLE
+                .get_or_create_stream(&stream_name, &tenant_id)
+                .clear();
         }
 
         let time = time.elapsed().as_secs_f64();

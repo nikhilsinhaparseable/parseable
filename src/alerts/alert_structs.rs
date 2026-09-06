@@ -29,7 +29,7 @@ use crate::{
         AlertError, CURRENT_ALERTS_VERSION,
         alert_enums::{
             AlertOperator, AlertQueryType, AlertState, AlertTask, AlertType, AlertVersion,
-            EvalConfig, LogicalOperator, NotificationState, Severity, WhereConfigOperator,
+            EvalConfig, NotificationState, Severity,
         },
         alert_traits::AlertTrait,
         target::{NotificationConfig, TARGETS},
@@ -38,6 +38,7 @@ use crate::{
     parseable::PARSEABLE,
     query::resolve_stream_names,
     storage::object_storage::{alert_json_path, alert_state_json_path, mttr_json_path},
+    utils::Conditions,
 };
 
 const RESERVED_FIELDS: &[&str] = &[
@@ -180,70 +181,6 @@ pub struct OperationConfig {
 #[serde(rename_all = "camelCase")]
 pub struct FilterConfig {
     pub conditions: Vec<Conditions>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-pub struct ConditionConfig {
-    pub column: String,
-    pub operator: WhereConfigOperator,
-    pub value: Option<String>,
-    #[serde(rename = "type")]
-    #[serde(default)]
-    pub column_type: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Conditions {
-    pub operator: Option<LogicalOperator>,
-    #[serde(default)]
-    pub condition_config: Vec<ConditionConfig>,
-    /// Nested condition groups for complex logic like (A OR B) AND (C OR D)
-    pub groups: Option<Vec<Conditions>>,
-}
-
-impl Conditions {
-    fn format_condition(cond: &ConditionConfig) -> String {
-        match cond.value.as_ref().filter(|v| !v.is_empty()) {
-            Some(val) => format!("{} {} {}", cond.column, cond.operator, val),
-            None => format!("{} {}", cond.column, cond.operator),
-        }
-    }
-
-    pub fn generate_filter_message(&self) -> String {
-        let op = self.operator.as_ref().unwrap_or(&LogicalOperator::And);
-        let separator = format!(" {op} ");
-
-        // Format inline condition_config entries
-        let condition_parts: Vec<String> = self
-            .condition_config
-            .iter()
-            .map(Self::format_condition)
-            .collect();
-
-        // Format nested groups recursively, skipping empty ones
-        let group_parts: Vec<String> = self
-            .groups
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|g| g.generate_filter_message())
-            .filter(|msg| !msg.is_empty())
-            .map(|msg| format!("({msg})"))
-            .collect();
-
-        let all_parts: Vec<&str> = condition_parts
-            .iter()
-            .chain(group_parts.iter())
-            .map(|s| s.as_str())
-            .collect();
-
-        match all_parts.len() {
-            0 => String::default(),
-            1 => all_parts[0].to_string(),
-            _ => format!("[{}]", all_parts.join(&separator)),
-        }
-    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]

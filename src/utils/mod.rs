@@ -26,6 +26,8 @@ pub mod time;
 pub mod uid;
 pub mod update;
 
+use std::fmt::{self, Display};
+
 use crate::handlers::TENANT_ID;
 use crate::handlers::http::middleware::{CLUSTER_SECRET, CLUSTER_SECRET_HEADER};
 use crate::handlers::http::rbac::RBACError;
@@ -40,8 +42,148 @@ use actix_web::http::header::HeaderMap;
 use actix_web::{FromRequest, HttpRequest};
 use actix_web_httpauth::extractors::basic::BasicAuth;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use derive_more::derive::FromStr;
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum LogicalOperator {
+    And,
+    Or,
+}
+
+impl Display for LogicalOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalOperator::And => write!(f, "AND"),
+            LogicalOperator::Or => write!(f, "OR"),
+        }
+    }
+}
+
+#[derive(
+    Debug, serde::Serialize, serde::Deserialize, Clone, Copy, FromStr, PartialEq, Eq, Hash,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum WhereConfigOperator {
+    #[serde(rename = "=")]
+    Equal,
+    #[serde(rename = "!=")]
+    NotEqual,
+    #[serde(rename = "<")]
+    LessThan,
+    #[serde(rename = ">")]
+    GreaterThan,
+    #[serde(rename = "<=")]
+    LessThanOrEqual,
+    #[serde(rename = ">=")]
+    GreaterThanOrEqual,
+    #[serde(rename = "is null")]
+    IsNull,
+    #[serde(rename = "is not null")]
+    IsNotNull,
+    #[serde(rename = "ilike")]
+    ILike,
+    #[serde(rename = "contains")]
+    Contains,
+    #[serde(rename = "begins with")]
+    BeginsWith,
+    #[serde(rename = "ends with")]
+    EndsWith,
+    #[serde(rename = "does not contain")]
+    DoesNotContain,
+    #[serde(rename = "does not begin with")]
+    DoesNotBeginWith,
+    #[serde(rename = "does not end with")]
+    DoesNotEndWith,
+}
+
+impl WhereConfigOperator {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Equal => "=",
+            Self::NotEqual => "!=",
+            Self::LessThan => "<",
+            Self::GreaterThan => ">",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThanOrEqual => ">=",
+            Self::IsNull => "is null",
+            Self::IsNotNull => "is not null",
+            Self::ILike => "ilike",
+            Self::Contains => "contains",
+            Self::BeginsWith => "begins with",
+            Self::EndsWith => "ends with",
+            Self::DoesNotContain => "does not contain",
+            Self::DoesNotBeginWith => "does not begin with",
+            Self::DoesNotEndWith => "does not end with",
+        }
+    }
+}
+
+impl Display for WhereConfigOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct ConditionConfig {
+    pub column: String,
+    pub operator: WhereConfigOperator,
+    pub value: Option<String>,
+    #[serde(rename = "type", default)]
+    pub column_type: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct Conditions {
+    pub operator: Option<LogicalOperator>,
+    #[serde(default)]
+    pub condition_config: Vec<ConditionConfig>,
+    /// Nested condition groups for complex logic like (A OR B) AND (C OR D).
+    pub groups: Option<Vec<Conditions>>,
+}
+
+impl Conditions {
+    fn format_condition(condition: &ConditionConfig) -> String {
+        match condition.value.as_ref().filter(|value| !value.is_empty()) {
+            Some(value) => format!("{} {} {}", condition.column, condition.operator, value),
+            None => format!("{} {}", condition.column, condition.operator),
+        }
+    }
+
+    pub fn generate_filter_message(&self) -> String {
+        let operator = self.operator.as_ref().unwrap_or(&LogicalOperator::And);
+        let separator = format!(" {operator} ");
+        let condition_parts = self
+            .condition_config
+            .iter()
+            .map(Self::format_condition)
+            .collect::<Vec<_>>();
+        let group_parts = self
+            .groups
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(Conditions::generate_filter_message)
+            .filter(|message| !message.is_empty())
+            .map(|message| format!("({message})"))
+            .collect::<Vec<_>>();
+        let all_parts = condition_parts
+            .iter()
+            .chain(group_parts.iter())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+
+        match all_parts.as_slice() {
+            [] => String::new(),
+            [only] => (*only).to_string(),
+            _ => format!("[{}]", all_parts.join(&separator)),
+        }
+    }
+}
 
 /// Compiled once at startup; reused for every `extract_datetime` call.
 /// Recompiling per call was the hot-path bottleneck for hot-tier work-list

@@ -52,6 +52,7 @@ use crate::query::error::ExecuteError;
 use crate::query::resolve_stream_names;
 use crate::query::{CountsRecord, CountsRequest, QUERY_SESSION, Query as LogicalQuery, execute};
 use crate::rbac::Users;
+use crate::rbac::policy::mandatory_filters_for_session;
 use crate::response::QueryResponse;
 use crate::storage::ObjectStorageError;
 use crate::utils::actix::extract_session_key_from_req;
@@ -97,11 +98,13 @@ pub async fn get_records_and_fields(
         .catalog
         .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
 
-    let query: LogicalQuery = into_query(query_request, &session_state, time_range).await?;
-
     let permissions = Users.get_permissions(creds);
 
     user_auth_for_datasets(&permissions, &tables, tenant_id).await?;
+    let mandatory_filters =
+        mandatory_filters_for_session(creds, tenant_id, &tables).map_err(QueryError::RowPolicy)?;
+    let query: LogicalQuery =
+        into_query(query_request, &session_state, time_range, mandatory_filters).await?;
 
     let (records, fields) = execute(query, false, tenant_id).await?;
 
@@ -122,6 +125,7 @@ pub async fn get_records_and_fields(
 pub async fn get_records_and_fields_for_authorized_query(
     query_request: &Query,
     authorized_tables: &[String],
+    creds: &SessionKey,
     tenant_id: &Option<String>,
 ) -> Result<(Option<Vec<RecordBatch>>, Option<Vec<String>>), QueryError> {
     let mut session_state = QUERY_SESSION.get_ctx().state();
@@ -141,7 +145,10 @@ pub async fn get_records_and_fields_for_authorized_query(
         .catalog
         .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
 
-    let query: LogicalQuery = into_query(query_request, &session_state, time_range).await?;
+    let mandatory_filters =
+        mandatory_filters_for_session(creds, tenant_id, &tables).map_err(QueryError::RowPolicy)?;
+    let query: LogicalQuery =
+        into_query(query_request, &session_state, time_range, mandatory_filters).await?;
     let (records, fields) = execute(query, false, tenant_id).await?;
 
     let records = match records {
@@ -169,11 +176,19 @@ pub async fn query(req: HttpRequest, query_request: Query) -> Result<HttpRespons
         .catalog
         .default_schema = tenant_id.as_deref().unwrap_or("public").to_owned();
 
-    let query: LogicalQuery = into_query(&query_request, &session_state, time_range).await?;
     let creds = extract_session_key_from_req(&req)?;
     let permissions = Users.get_permissions(&creds);
 
     user_auth_for_datasets(&permissions, &tables, &tenant_id).await?;
+    let mandatory_filters = mandatory_filters_for_session(&creds, &tenant_id, &tables)
+        .map_err(QueryError::RowPolicy)?;
+    let query: LogicalQuery = into_query(
+        &query_request,
+        &session_state,
+        time_range,
+        mandatory_filters,
+    )
+    .await?;
     let time = Instant::now();
 
     // Track billing metrics for query calls
@@ -417,6 +432,12 @@ pub async fn get_counts(
 
     // does user have access to table?
     user_auth_for_datasets(&permissions, std::slice::from_ref(&body.stream), &tenant_id).await?;
+    create_streams_for_distributed(vec![body.stream.clone()], &tenant_id).await?;
+    let has_mandatory_filters =
+        !mandatory_filters_for_session(&creds, &tenant_id, std::slice::from_ref(&body.stream))
+            .map_err(QueryError::RowPolicy)?
+            .is_empty();
+
     // Track billing metrics for query calls
     let current_date = chrono::Utc::now().date_naive().to_string();
     increment_query_calls_by_date(
@@ -425,7 +446,7 @@ pub async fn get_counts(
     );
     // if the user has given a sql query (counts call with filters applied), then use this flow
     // this could include filters or group by
-    if body.conditions.is_some() {
+    if body.conditions.is_some() || has_mandatory_filters {
         let group_by_cols: Vec<String> = body
             .conditions
             .as_ref()
@@ -439,7 +460,11 @@ pub async fn get_counts(
             .get_time_partition()
             .unwrap_or_else(|| DEFAULT_TIMESTAMP_KEY.into());
 
-        let sql = body.get_df_sql(time_partition).await?;
+        let sql = if body.conditions.is_some() {
+            body.get_df_sql(time_partition).await?
+        } else {
+            body.get_policy_df_sql(time_partition).await?
+        };
 
         let query_request = Query {
             query: sql,
@@ -622,6 +647,7 @@ pub async fn into_query(
     query: &Query,
     session_state: &SessionState,
     time_range: TimeRange,
+    mandatory_filters: crate::rbac::policy::MandatoryQueryFilters,
 ) -> Result<LogicalQuery, QueryError> {
     if query.query.is_empty() {
         return Err(QueryError::EmptyQuery);
@@ -640,6 +666,7 @@ pub async fn into_query(
         raw_logical_plan,
         time_range,
         filter_tag: query.filter_tags.clone(),
+        mandatory_filters,
     })
 }
 
@@ -713,6 +740,8 @@ Description: {0}"#
     SerdeJsonError(#[from] serde_json::Error),
     #[error("CustomError: {0}")]
     CustomError(String),
+    #[error("Row policy error: {0}")]
+    RowPolicy(String),
     #[error("No available queriers found")]
     NoAvailableQuerier,
     #[error("{0}")]
@@ -727,6 +756,7 @@ impl actix_web::ResponseError for QueryError {
             QueryError::JsonParse(_) => StatusCode::INTERNAL_SERVER_ERROR,
             QueryError::Execute(e) => e.status_code(),
             QueryError::MetastoreError(e) => e.status_code(),
+            QueryError::Unauthorized | QueryError::RowPolicy(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::BAD_REQUEST,
         }
     }

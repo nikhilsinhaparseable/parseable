@@ -2001,7 +2001,12 @@ pub async fn send_query_request(
             }
         }
     } else {
+        let status = res.status();
         let err_text = res.text().await?;
-        Err(QueryError::JsonParse(err_text))
+        if status == reqwest::StatusCode::FORBIDDEN {
+            Err(QueryError::RowPolicy(err_text))
+        } else {
+            Err(QueryError::JsonParse(err_text))
+        }
     }
 }

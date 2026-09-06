@@ -17,6 +17,7 @@
  */
 
 pub mod map;
+pub mod policy;
 pub mod role;
 pub mod user;
 pub mod utils;

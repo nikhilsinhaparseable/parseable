@@ -47,7 +47,7 @@ pub mod target;
 
 pub use crate::alerts::alert_enums::{
     AggregateFunction, AlertOperator, AlertQueryType, AlertState, AlertTask, AlertType,
-    AlertVersion, EvalConfig, LogicalOperator, NotificationState, Severity, WhereConfigOperator,
+    AlertVersion, EvalConfig, NotificationState, Severity,
 };
 pub use crate::alerts::alert_structs::{
     AlertConfig, AlertInfo, AlertRequest, AlertStateEntry, Alerts, AlertsInfo, AlertsInfoByState,
@@ -62,11 +62,13 @@ use crate::metastore::MetastoreError;
 use crate::parseable::{DEFAULT_TENANT, PARSEABLE, StreamNotFound};
 use crate::query::{QUERY_SESSION, resolve_stream_names};
 use crate::rbac::map::{SessionKey, sessions};
+use crate::rbac::policy::require_writer_access_for_session;
 use crate::rbac::{Response, Users, role::Action};
 use crate::sse::{SSE_HANDLER, SSEAlertInfo, SSEEvent};
 use crate::storage;
 use crate::storage::ObjectStorageError;
 use crate::sync::alert_runtime;
+use crate::utils::WhereConfigOperator;
 use crate::utils::{get_tenant_id_from_key, user_auth_for_query};
 
 // these types describe the scheduled task for an alert
@@ -198,6 +200,24 @@ pub async fn user_auth_for_alert_config(
             Ok(())
         }
     }
+}
+
+/// Alert definitions may only be created or moved onto streams where the caller has
+/// Writer-or-higher access. Reader query access, including row-policy access, is insufficient.
+pub async fn user_writer_auth_for_alert_config(
+    session: &SessionKey,
+    alert: &AlertConfig,
+) -> Result<(), actix_web::Error> {
+    let datasets = match alert.query_type {
+        AlertQueryType::Builder | AlertQueryType::Code => resolve_stream_names(&alert.query)
+            .map_err(|error| {
+                actix_web::error::ErrorBadRequest(format!("Failed to extract table names: {error}"))
+            })?,
+        AlertQueryType::Promql => alert.datasets.clone(),
+    };
+    let tenant_id = get_tenant_id_from_key(session);
+    require_writer_access_for_session(session, &tenant_id, &datasets)
+        .map_err(actix_web::error::ErrorUnauthorized)
 }
 
 impl AlertConfig {

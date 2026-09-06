@@ -82,22 +82,6 @@ impl Display for Severity {
     }
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub enum LogicalOperator {
-    And,
-    Or,
-}
-
-impl Display for LogicalOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LogicalOperator::And => write!(f, "AND"),
-            LogicalOperator::Or => write!(f, "OR"),
-        }
-    }
-}
-
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum AlertType {
@@ -163,71 +147,6 @@ impl Display for AlertOperator {
             AlertOperator::GreaterThanOrEqual => write!(f, ">="),
             AlertOperator::LessThanOrEqual => write!(f, "<="),
         }
-    }
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, FromStr, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum WhereConfigOperator {
-    #[serde(rename = "=")]
-    Equal,
-    #[serde(rename = "!=")]
-    NotEqual,
-    #[serde(rename = "<")]
-    LessThan,
-    #[serde(rename = ">")]
-    GreaterThan,
-    #[serde(rename = "<=")]
-    LessThanOrEqual,
-    #[serde(rename = ">=")]
-    GreaterThanOrEqual,
-    #[serde(rename = "is null")]
-    IsNull,
-    #[serde(rename = "is not null")]
-    IsNotNull,
-    #[serde(rename = "ilike")]
-    ILike,
-    #[serde(rename = "contains")]
-    Contains,
-    #[serde(rename = "begins with")]
-    BeginsWith,
-    #[serde(rename = "ends with")]
-    EndsWith,
-    #[serde(rename = "does not contain")]
-    DoesNotContain,
-    #[serde(rename = "does not begin with")]
-    DoesNotBeginWith,
-    #[serde(rename = "does not end with")]
-    DoesNotEndWith,
-}
-
-impl WhereConfigOperator {
-    /// Convert the enum value to its string representation
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Equal => "=",
-            Self::NotEqual => "!=",
-            Self::LessThan => "<",
-            Self::GreaterThan => ">",
-            Self::LessThanOrEqual => "<=",
-            Self::GreaterThanOrEqual => ">=",
-            Self::IsNull => "is null",
-            Self::IsNotNull => "is not null",
-            Self::ILike => "ilike",
-            Self::Contains => "contains",
-            Self::BeginsWith => "begins with",
-            Self::EndsWith => "ends with",
-            Self::DoesNotContain => "does not contain",
-            Self::DoesNotBeginWith => "does not begin with",
-            Self::DoesNotEndWith => "does not end with",
-        }
-    }
-}
-
-impl Display for WhereConfigOperator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // We can reuse our as_str method to get the string representation
-        write!(f, "{}", self.as_str())
     }
 }
 

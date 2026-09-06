@@ -95,19 +95,20 @@ pub async fn run_do_get_rpc(
 pub async fn append_temporary_events(
     stream_name: &str,
     minute_result: Vec<&RecordBatch>,
+    tenant_id: &Option<String>,
 ) -> Result<
     //Vec<Event>
     Event,
     Status,
 > {
     let schema = PARSEABLE
-        .get_stream(stream_name, &None)
+        .get_stream(stream_name, tenant_id)
         .map_err(|err| Status::failed_precondition(format!("Metadata Error: {err}")))?
         .get_schema();
     let rb = concat_batches(&schema, minute_result)
         .map_err(|err| Status::failed_precondition(format!("ArrowError: {err}")))?;
 
-    let event = push_logs_unchecked(rb, stream_name)
+    let event = push_logs_unchecked(rb, stream_name, tenant_id)
         .await
         .map_err(|err| Status::internal(err.to_string()))?;
     Ok(event)
